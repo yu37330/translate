@@ -4,6 +4,7 @@ import os
 import re
 import time
 from typing import Optional, Tuple
+from pathlib import Path
 
 import numpy as np
 from deep_translator import GoogleTranslator
@@ -36,13 +37,15 @@ FINALIZE_SILENCE_SEC = 1.2
 MAX_BUFFER_CHARS = 120
 RING_TAIL_SEC = 0.5
 
-load_dotenv()
+load_dotenv(Path(__file__).with_name(".env"))
 OPENROUTER_API_KEY = os.getenv("OPENROUTER_API_KEY", "")
 OPENROUTER_MODEL = "google/gemma-3-27b-it:free"
 openrouter_client = AsyncOpenAI(
     base_url="https://openrouter.ai/api/v1",
     api_key=OPENROUTER_API_KEY,
 )
+if not OPENROUTER_API_KEY:
+    print("[WARN] OPENROUTER_API_KEY is empty. Set it in .env")
 
 app = FastAPI()
 templates = Jinja2Templates(directory="templates")
@@ -87,6 +90,7 @@ def make_subtitle_json(
 
 class SummarizeRequest(BaseModel):
     history: list[dict]
+    prompt: Optional[str] = None
 
 
 # ---------- HTTP ----------
@@ -97,6 +101,8 @@ async def index(request: Request):
 
 @app.post("/api/summarize")
 async def summarize(req: SummarizeRequest):
+    if not OPENROUTER_API_KEY:
+        return JSONResponse({"error": "OPENROUTER_API_KEY is not set (.env)"}, status_code=500)
     if not req.history:
         return JSONResponse({"error": "history is empty"}, status_code=400)
 
@@ -111,17 +117,22 @@ async def summarize(req: SummarizeRequest):
 
     history_text = "\n".join(lines)
 
-    prompt = f"""
-以下の対話ログを読み、主要トピックと結論を要約してください。
-短い箇条書きで、重要なアクションがあれば明示してください。
-## Summary (English)
-- Main topics
-- Key points
-- Conclusions or action items (if any)
----
-Conversation:
-{history_text}
-"""
+    default_prompt = (
+        "以下の対話ログを読み、主要トピックと結論を要約してください。\\n"
+        "短い箇条書きで、重要なアクションがあれば明示してください。\\n"
+        "## Summary (English)\\n"
+        "- Main topics\\n"
+        "- Key points\\n"
+        "- Conclusions or action items (if any)\\n"
+        "---\\n"
+        "Conversation:\\n"
+        "{history_text}\\n"
+    )
+
+    prompt_template = (req.prompt or default_prompt).strip()
+    if "{history_text}" not in prompt_template:
+        prompt_template = f"{prompt_template}\\n\\nConversation:\\n{{history_text}}"
+    prompt = prompt_template.format(history_text=history_text)
 
     try:
         response = await openrouter_client.chat.completions.create(

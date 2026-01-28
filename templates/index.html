@@ -1,0 +1,518 @@
+﻿<!doctype html>
+<html lang="ja">
+<head>
+  <meta charset="utf-8" />
+  <title>Whisper + Translate Subtitles</title>
+  <style>
+    body { font-family: "Noto Sans JP", "Segoe UI", sans-serif; max-width: 960px; margin: 24px auto; padding: 0 16px; background: #f7f9fc; }
+    h2 { margin-bottom: 8px; }
+    button { padding: 10px 14px; margin-right: 8px; border-radius: 6px; border: 1px solid #999; cursor: pointer; background: #fff; }
+    button:disabled { opacity: 0.6; cursor: not-allowed; }
+    .hint { color: #666; font-size: 13px; margin-top: 8px; }
+    .settings { margin: 16px 0; padding: 12px; background: #fff; border-radius: 10px; border: 1px solid #e0e5ec; box-shadow: 0 4px 12px rgba(0,0,0,0.04); }
+    .settings-row { display: flex; gap: 24px; flex-wrap: wrap; align-items: center; margin-bottom: 12px; }
+    .settings-row:last-child { margin-bottom: 0; }
+    .settings label { margin-right: 12px; cursor: pointer; }
+    .settings select { padding: 6px 10px; border-radius: 6px; border: 1px solid #ccc; }
+    .settings b { min-width: 120px; }
+    .status { margin-top: 12px; padding: 10px 14px; background: #e8f5e9; border-radius: 6px; font-size: 14px; border: 1px solid #c8e6c9; }
+    .status.error { background: #ffebee; border-color: #ffcdd2; }
+    .status.working { background: #fff8e1; border-color: #ffe082; }
+
+    #current { margin-top: 16px; display: grid; grid-template-columns: repeat(auto-fit, minmax(300px, 1fr)); gap: 16px; }
+    #current .panel { padding: 16px; border-radius: 10px; min-height: 80px; background: #fff; border: 1px solid #e0e5ec; box-shadow: 0 4px 10px rgba(0,0,0,0.03); }
+    #current .label { font-size: 12px; font-weight: bold; margin-bottom: 8px; text-transform: uppercase; letter-spacing: .05em; color: #546e7a; }
+    #current .text { font-size: 20px; line-height: 1.6; }
+    #current.interim .text { opacity: 0.7; }
+    #current.interim .label { color: #90a4ae; }
+    .hidden { display: none; }
+
+    #history { margin-top: 24px; border: 1px solid #e0e5ec; border-radius: 10px; max-height: 260px; overflow-y: auto; background: #fff; box-shadow: inset 0 1px 0 rgba(0,0,0,0.02); }
+    #history .header { padding: 12px 16px; background: #f2f4f8; font-weight: bold; position: sticky; top: 0; border-bottom: 1px solid #e0e5ec; }
+    #history .item { display: grid; grid-template-columns: 70px 1fr 1fr; gap: 12px; padding: 10px 16px; border-bottom: 1px solid #f0f2f6; }
+    #history .item:last-child { border-bottom: none; }
+    #history .time { color: #999; font-size: 12px; }
+    #history .original { color: #e65100; }
+    #history .translated { color: #1565c0; }
+    #history .item.summarized { background: #f9f9f9; opacity: 0.7; }
+
+    #summarySection { margin-top: 24px; border: 1px solid #d1c4e9; border-radius: 10px; background: #faf7ff; }
+    #summarySection .header { padding: 12px 16px; background: #ede7f6; font-weight: bold; color: #512da8; border-bottom: 1px solid #d1c4e9; display: flex; justify-content: space-between; align-items: center; gap: 8px; }
+    #summarySection .header .buttons { display: flex; gap: 8px; }
+    #summarySection .header button { background: #673ab7; color: white; border: none; border-radius: 6px; cursor: pointer; padding: 8px 12px; font-size: 13px; border: 1px solid #512da8; }
+    #summarySection .header button.full { background: #ff7043; border-color: #e64a19; }
+    #summarySection .header button:disabled { background: #c5cae9; border-color: #c5cae9; }
+    #summaryList { max-height: 400px; overflow-y: auto; }
+    .summary-item { padding: 16px; border-bottom: 1px solid #e1bee7; white-space: pre-wrap; line-height: 1.6; }
+    .summary-item:last-child { border-bottom: none; }
+    .summary-item .summary-header { font-size: 12px; color: #7b1fa2; margin-bottom: 8px; font-weight: bold; }
+    .summary-item.full-summary { background: #fff3e0; border-left: 4px solid #ff5722; }
+    .summary-item.full-summary .summary-header { color: #e64a19; }
+    #summaryEmpty { padding: 16px; color: #777; font-style: italic; }
+
+    #log { margin-top: 16px; padding: 12px; background: #111827; color: #a7f3d0; font-family: monospace; font-size: 12px; border-radius: 10px; max-height: 140px; overflow-y: auto; }
+    #log .error { color: #f87171; }
+    #log .success { color: #6ee7b7; }
+    #log .info { color: #93c5fd; }
+  </style>
+</head>
+<body>
+  <h2>Live Subtitles</h2>
+
+  <div class="settings">
+    <div class="settings-row">
+      <b>音声ソース:</b>
+      <label><input type="radio" name="audioSource" value="mic" checked> マイク</label>
+      <label><input type="radio" name="audioSource" value="system"> システム音 (会議など)</label>
+    </div>
+    <div class="settings-row">
+      <b>言語設定</b>
+      <select id="sourceLang">
+        <option value="auto">自動判定</option>
+        <option value="ja" selected>日本語</option>
+        <option value="en">English</option>
+        <option value="zh">中文</option>
+        <option value="ko">한국어</option>
+        <option value="es">Español</option>
+        <option value="fr">Français</option>
+        <option value="de">Deutsch</option>
+      </select>
+      <span>→</span>
+      <select id="targetLang">
+        <option value="ja">日本語</option>
+        <option value="en" selected>English</option>
+        <option value="zh">中文</option>
+        <option value="ko">한국어</option>
+        <option value="es">Español</option>
+        <option value="fr">Français</option>
+        <option value="de">Deutsch</option>
+      </select>
+    </div>
+    <div class="settings-row">
+      <b>翻訳</b>
+      <label><input type="checkbox" id="translateToggle" checked> 翻訳する</label>
+      <span class="hint">オフにすると文字起こしのみ</span>
+    </div>
+  </div>
+
+  <div>
+    <button id="startBtn">Start</button>
+    <button id="stopBtn" disabled>Stop</button>
+    <button id="clearBtn">履歴クリア</button>
+    <div class="hint">2秒ごとに16kHz PCMを送信。サーバ側でWhisper→翻訳→表示。</div>
+  </div>
+
+  <div id="statusArea"></div>
+
+  <div id="current">
+    <div class="panel original-panel">
+      <div class="label" id="originalLabel">Original (JA)</div>
+      <div class="text" id="currentOriginal">-</div>
+    </div>
+    <div class="panel translated-panel">
+      <div class="label" id="translatedLabel">Translated (EN)</div>
+      <div class="text" id="currentTranslated">-</div>
+    </div>
+  </div>
+
+  <div id="history">
+    <div class="header">履歴 / History</div>
+    <div id="historyList"></div>
+  </div>
+
+  <div id="summarySection">
+    <div class="header">
+      <span>要約 (AI)</span>
+      <div class="buttons">
+        <button id="summarizeBtn">直近を要約</button>
+        <button id="fullSummarizeBtn" class="full">全体を要約</button>
+      </div>
+    </div>
+    <div id="summaryList">
+      <div id="summaryEmpty">履歴を追加すると要約できます。</div>
+    </div>
+  </div>
+
+  <div id="log"></div>
+
+  <script>
+    const SAMPLE_RATE = 16000;
+    const CHUNK_SEC = 2;
+    const VAD_THRESHOLD = 0.002; // RMS gate on client (server also double-checks)
+
+    const LANG_NAMES = {
+      "auto": "Auto",
+      "ja": "日本語",
+      "en": "English",
+      "zh": "中文",
+      "ko": "한국어",
+      "es": "Español",
+      "fr": "Français",
+      "de": "Deutsch",
+      "none": "No Translate"
+    };
+
+    let stream = null;
+    let ws = null;
+    let isRecording = false;
+    let historyData = [];
+    let lastSummarizedIndex = 0;
+    let summaryCount = 0;
+
+    // audio worklet state
+    let audioCtx = null;
+    let workletNode = null;
+    let pcmBuffer = [];
+    let rmsSum = 0;
+    let rmsCount = 0;
+
+    function log(msg, type = "") {
+      const logEl = document.getElementById("log");
+      const time = new Date().toLocaleTimeString();
+      const line = document.createElement("div");
+      line.className = type;
+      line.textContent = `[${time}] ${msg}`;
+      logEl.appendChild(line);
+      logEl.scrollTop = logEl.scrollHeight;
+    }
+
+    function setStatus(msg, type = "") {
+      document.getElementById("statusArea").innerHTML = `<div class="status ${type}">${msg}</div>`;
+    }
+
+    function getSourceLang() { return document.getElementById("sourceLang").value; }
+
+    function updateLabels() {
+      const source = getSourceLang();
+      const target = getTargetLang();
+      document.getElementById("originalLabel").textContent = `Original (${LANG_NAMES[source] || source})`;
+      document.getElementById("translatedLabel").textContent = `Translated (${LANG_NAMES[target] || target})`;
+
+      const translatedPanel = document.querySelector(".translated-panel");
+      if (target === "none") {
+        translatedPanel.classList.add("hidden");
+      } else {
+        translatedPanel.classList.remove("hidden");
+      }
+    }
+
+    function updateSubtitle(data) {
+      const current = document.getElementById("current");
+      if (data.is_final) {
+        current.classList.remove("interim");
+      } else {
+        current.classList.add("interim");
+      }
+
+      document.getElementById("currentOriginal").textContent = data.original;
+      const translatedText = data.translated ? data.translated : (data.is_final ? "-" : "…");
+      document.getElementById("currentTranslated").textContent = translatedText;
+      const sourceLang = data.source_lang || getSourceLang();
+      document.getElementById("originalLabel").textContent = `Original (${LANG_NAMES[sourceLang] || sourceLang})`;
+
+      if (data.is_final) {
+        historyData.push({
+          original: data.original,
+          translated: data.translated,
+          source_lang: data.source_lang,
+          target_lang: data.target_lang,
+          time: data.time,
+          latency_ms: data.latency_ms,
+          chunk_id: data.chunk_id,
+        });
+
+        const historyList = document.getElementById("historyList");
+        const item = document.createElement("div");
+        item.className = "item";
+        item.innerHTML = `
+          <div class="time">${data.time}</div>
+          <div class="original">${data.original}</div>
+          <div class="translated">${data.translated || ""}</div>
+        `;
+        historyList.appendChild(item);
+        document.getElementById("history").scrollTop = document.getElementById("history").scrollHeight;
+      }
+    }
+
+    function clearHistory() {
+      historyData = [];
+      lastSummarizedIndex = 0;
+      summaryCount = 0;
+      document.getElementById("historyList").innerHTML = "";
+      document.getElementById("currentOriginal").textContent = "-";
+      document.getElementById("currentTranslated").textContent = "-";
+      document.getElementById("summaryList").innerHTML = '<div id="summaryEmpty">履歴を追加すると要約できます。</div>';
+      document.getElementById("current").classList.remove("interim");
+      log("履歴をクリア", "info");
+    }
+
+    async function generateSummary() {
+      const newHistory = historyData.slice(lastSummarizedIndex);
+      if (newHistory.length === 0) {
+        alert("要約する新しい履歴がありません");
+        return;
+      }
+      const btn = document.getElementById("summarizeBtn");
+      const fullBtn = document.getElementById("fullSummarizeBtn");
+      btn.disabled = true; fullBtn.disabled = true; btn.textContent = "生成中...";
+      log(`要約リクエスト送信 (${newHistory.length} 件)`, "info");
+      try {
+        const res = await fetch("/api/summarize", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ history: newHistory }) });
+        const result = await res.json();
+        if (result.error) throw new Error(result.error);
+        summaryCount++;
+        addSummaryItem(result.summary, `要約 #${summaryCount}`, false);
+        markHistoryAsSummarized(historyData.length);
+        lastSummarizedIndex = historyData.length;
+        log("要約完了", "success");
+      } catch (err) {
+        log(`要約エラー: ${err.message}`, "error");
+        alert(err.message);
+      } finally {
+        btn.disabled = false; fullBtn.disabled = false; btn.textContent = "直近を要約";
+      }
+    }
+
+    async function generateFullSummary() {
+      if (historyData.length === 0) {
+        alert("履歴がありません");
+        return;
+      }
+      const btn = document.getElementById("summarizeBtn");
+      const fullBtn = document.getElementById("fullSummarizeBtn");
+      btn.disabled = true; fullBtn.disabled = true; fullBtn.textContent = "生成中...";
+      log(`全体要約リクエスト送信 (${historyData.length} 件)`, "info");
+      try {
+        const res = await fetch("/api/summarize", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ history: historyData }) });
+        const result = await res.json();
+        if (result.error) throw new Error(result.error);
+        addSummaryItem(result.summary, "全体要約", true);
+        log("全体要約完了", "success");
+      } catch (err) {
+        log(`要約エラー: ${err.message}`, "error");
+        alert(err.message);
+      } finally {
+        btn.disabled = false; fullBtn.disabled = false; fullBtn.textContent = "全体を要約";
+      }
+    }
+
+    function addSummaryItem(text, title, isFull) {
+      const emptyEl = document.getElementById("summaryEmpty");
+      if (emptyEl) emptyEl.remove();
+      const summaryList = document.getElementById("summaryList");
+      const item = document.createElement("div");
+      item.className = "summary-item" + (isFull ? " full-summary" : "");
+      const time = new Date().toLocaleTimeString();
+      item.innerHTML = `
+        <div class="summary-header">${title} (${time})</div>
+        <div class="summary-text">${escapeHtml(text)}</div>
+      `;
+      summaryList.appendChild(item);
+      summaryList.scrollTop = summaryList.scrollHeight;
+    }
+
+    function escapeHtml(text) {
+      return text
+        .replace(/&/g, "&amp;")
+        .replace(/</g, "&lt;")
+        .replace(/>/g, "&gt;")
+        .replace(/"/g, "&quot;")
+        .replace(/'/g, "&#039;");
+    }
+
+    function markHistoryAsSummarized(upToIndex) {
+      const items = document.querySelectorAll("#historyList .item");
+      for (let i = 0; i < upToIndex && i < items.length; i++) {
+        items[i].classList.add("summarized");
+      }
+    }
+
+    function getWs() {
+      const proto = location.protocol === "https:" ? "wss" : "ws";
+      return new WebSocket(`${proto}://${location.host}/ws/audio`);
+    }
+
+    function getSelectedAudioSource() {
+      return document.querySelector('input[name="audioSource"]:checked').value;
+    }
+
+    async function getAudioStream() {
+      const source = getSelectedAudioSource();
+      if (source === "mic") {
+        log("マイクを取得", "info");
+        return await navigator.mediaDevices.getUserMedia({ audio: true });
+      } else {
+        log("システム音声を取得", "info");
+        const displayStream = await navigator.mediaDevices.getDisplayMedia({ video: true, audio: true });
+        displayStream.getVideoTracks().forEach(t => t.stop());
+        const audioTracks = displayStream.getAudioTracks();
+        if (audioTracks.length === 0) throw new Error("オーディオトラックがありません");
+        return new MediaStream(audioTracks);
+      }
+    }
+
+    function sendConfig() {
+      if (ws && ws.readyState === WebSocket.OPEN) {
+        const config = { type: "config", source_lang: getSourceLang(), target_lang: getTargetLang() };
+        ws.send(JSON.stringify(config));
+        log(`言語設定送信: ${getSourceLang()} -> ${getTargetLang()}`, "info");
+      }
+    }
+
+    function getTargetLang() {
+      const translateOn = document.getElementById("translateToggle").checked;
+      if (!translateOn) return "none";
+      return document.getElementById("targetLang").value;
+    }
+
+    async function setupAudioWorklet(stream) {
+      audioCtx = new AudioContext({ sampleRate: SAMPLE_RATE });
+      const workletCode = `
+        class PCMCollector extends AudioWorkletProcessor {
+          constructor() { super(); this.targetRate = ${SAMPLE_RATE}; this.ratio = sampleRate / this.targetRate; }
+          process(inputs) {
+            const input = inputs[0];
+            if (!input || input.length === 0 || !input[0]) return true;
+            const ch = input[0];
+            if (ch.length === 0) return true;
+            const step = this.ratio || 1;
+            const out = [];
+            for (let i = 0; i < ch.length; i += step) { out.push(ch[Math.floor(i)]); }
+            let sum = 0;
+            for (let i = 0; i < out.length; i++) sum += out[i] * out[i];
+            const rms = Math.sqrt(sum / (out.length || 1));
+            const pcm = new Int16Array(out.length);
+            for (let i = 0; i < out.length; i++) {
+              const v = Math.max(-1, Math.min(1, out[i]));
+              pcm[i] = v * 32767;
+            }
+            this.port.postMessage({ pcm, rms });
+            return true;
+          }
+        }
+        registerProcessor('pcm-collector', PCMCollector);
+      `;
+      const blob = new Blob([workletCode], { type: "application/javascript" });
+      const url = URL.createObjectURL(blob);
+      await audioCtx.audioWorklet.addModule(url);
+      const source = audioCtx.createMediaStreamSource(stream);
+      workletNode = new AudioWorkletNode(audioCtx, 'pcm-collector');
+      const silentGain = audioCtx.createGain();
+      silentGain.gain.value = 0;
+      source.connect(workletNode);
+      workletNode.connect(silentGain);
+      silentGain.connect(audioCtx.destination);
+      workletNode.port.onmessage = handlePcmFrame;
+    }
+
+    function handlePcmFrame(event) {
+      const { pcm, rms } = event.data;
+      rmsSum += rms;
+      rmsCount += 1;
+      for (let i = 0; i < pcm.length; i++) pcmBuffer.push(pcm[i]);
+
+      const chunkSamples = SAMPLE_RATE * CHUNK_SEC;
+      if (pcmBuffer.length >= chunkSamples) {
+        const avgRms = rmsSum / Math.max(1, rmsCount);
+        const pcmToSend = new Int16Array(pcmBuffer.slice(0, chunkSamples));
+        pcmBuffer = pcmBuffer.slice(chunkSamples);
+        rmsSum = 0; rmsCount = 0;
+
+        if (avgRms < VAD_THRESHOLD) {
+          log(`VAD skip (rms=${avgRms.toFixed(4)})`, "info");
+          return;
+        }
+
+        if (ws && ws.readyState === WebSocket.OPEN && isRecording) {
+          ws.send(pcmToSend.buffer);
+          log(`送信: ${pcmToSend.byteLength} bytes (rms=${avgRms.toFixed(4)})`, "info");
+          setStatus("送信中... Whisper処理待ち", "working");
+        }
+      }
+    }
+
+    async function start() {
+      log("開始", "info");
+      setStatus("初期化中...", "working");
+      updateLabels();
+      try {
+        stream = await getAudioStream();
+        await setupAudioWorklet(stream);
+        log("オーディオ準備OK", "success");
+      } catch (e) {
+        log(`エラー: ${e.message}`, "error");
+        setStatus("音声取得に失敗", "error");
+        return;
+      }
+
+      ws = getWs();
+      ws.binaryType = "arraybuffer";
+
+      ws.onopen = () => {
+        log("WebSocket接続", "success");
+        sendConfig();
+        setStatus("録音・送信中", "working");
+        isRecording = true;
+        document.getElementById("startBtn").disabled = true;
+        document.getElementById("stopBtn").disabled = false;
+        document.querySelectorAll('input[name="audioSource"]').forEach(r => r.disabled = true);
+        document.getElementById("sourceLang").disabled = true;
+        document.getElementById("targetLang").disabled = true;
+      };
+
+      ws.onmessage = (e) => {
+        try {
+          const data = JSON.parse(e.data);
+          const label = data.is_final ? "確定" : "暫定";
+          log(`${label}: ${data.original}`, "success");
+          setStatus(`処理完了 (latency ${data.latency_ms} ms)`, "");
+          updateSubtitle(data);
+        } catch {
+          log("JSON parse error", "error");
+        }
+      };
+
+      ws.onerror = () => {
+        log("WebSocket error", "error");
+        setStatus("接続エラー", "error");
+        stop();
+      };
+
+      ws.onclose = () => {
+        log("WebSocket closed", "info");
+      };
+    }
+
+    function stop() {
+      log("停止", "info");
+      setStatus("停止しました", "");
+      isRecording = false;
+
+      if (workletNode) { workletNode.port.onmessage = null; workletNode.disconnect(); workletNode = null; }
+      if (audioCtx) { audioCtx.close(); audioCtx = null; }
+      pcmBuffer = []; rmsSum = 0; rmsCount = 0;
+
+      if (stream) { stream.getTracks().forEach(t => t.stop()); stream = null; }
+      if (ws) { ws.close(); ws = null; }
+
+      document.getElementById("startBtn").disabled = false;
+      document.getElementById("stopBtn").disabled = true;
+      document.querySelectorAll('input[name="audioSource"]').forEach(r => r.disabled = false);
+      document.getElementById("sourceLang").disabled = false;
+      document.getElementById("targetLang").disabled = false;
+    }
+
+    document.getElementById("startBtn").addEventListener("click", start);
+    document.getElementById("stopBtn").addEventListener("click", stop);
+    document.getElementById("clearBtn").addEventListener("click", clearHistory);
+    document.getElementById("summarizeBtn").addEventListener("click", generateSummary);
+    document.getElementById("fullSummarizeBtn").addEventListener("click", generateFullSummary);
+    document.getElementById("sourceLang").addEventListener("change", () => { updateLabels(); sendConfig(); });
+    document.getElementById("targetLang").addEventListener("change", () => { updateLabels(); sendConfig(); });
+    document.getElementById("translateToggle").addEventListener("change", () => { updateLabels(); sendConfig(); });
+
+    updateLabels();
+    log("準備完了", "success");
+  </script>
+</body>
+</html>

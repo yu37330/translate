@@ -1,0 +1,11 @@
+fastapi
+uvicorn[standard]
+jinja2
+python-multipart
+websockets
+boto3
+faster-whisper
+numpy
+deep-translator
+openai
+python-dotenv

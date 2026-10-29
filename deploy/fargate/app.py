@@ -27,6 +27,7 @@ load_dotenv(Path(__file__).with_name('.env'))
 
 # .env読み込み後にBedrockの設定値を確定する
 from bedrock_text import BEDROCK_MODEL_ID, generate_text, translate_text
+from streaming_asr import UtteranceBuffer
 
 # ---------- Configuration ----------
 DEFAULT_SOURCE_LANG = "ja"
@@ -38,6 +39,13 @@ ASR_MODEL_PATH = os.getenv("ASR_MODEL_PATH", ASR_MODEL_SIZE)
 ASR_DEVICE = "cpu"  # FargateではGPUを利用できない
 ASR_COMPUTE_TYPE = "int8"
 ASR_CPU_THREADS = int(os.getenv("ASR_CPU_THREADS", "4"))
+ASR_BEAM_SIZE = min(8, max(1, int(os.getenv("ASR_BEAM_SIZE", "3"))))
+ASR_SPEECH_THRESHOLD = float(os.getenv("ASR_SPEECH_THRESHOLD", "0.0006"))
+ASR_VOCAB_PROMPT = os.getenv("ASR_VOCAB_PROMPT", "").strip()[:500]
+ASR_PREVIOUS_CONTEXT_CHARS = min(160, max(0, int(os.getenv("ASR_PREVIOUS_CONTEXT_CHARS", "80"))))
+ASR_MIN_INTERIM_SEC = float(os.getenv("ASR_MIN_INTERIM_SEC", "4"))
+ASR_INTERIM_INTERVAL_SEC = float(os.getenv("ASR_INTERIM_INTERVAL_SEC", "4"))
+ASR_MAX_UTTERANCE_SEC = float(os.getenv("ASR_MAX_UTTERANCE_SEC", "12"))
 APP_ACCESS_TOKEN = os.getenv("APP_ACCESS_TOKEN", "")
 MAX_AUDIO_CHUNK_BYTES = 128_000
 MAX_AUDIO_QUEUE_CHUNKS = 8
@@ -168,226 +176,123 @@ async def summarize(req: SummarizeRequest, request: Request):
 
 
 # ---------- WebSocket ----------
-def run_whisper(audio: np.ndarray, language: Optional[str]) -> Tuple[str, object]:
+def run_whisper(audio: np.ndarray, language: Optional[str], prompt: str) -> Tuple[str, object]:
+    # Silero VAD filters intra-utterance silence but we never discard browser PCM.
+    # The model processes the FULL buffered utterance, not isolated 2-second pieces.
     segments, info = asr_model.transcribe(
         audio,
         language=language,
         vad_filter=True,
-        beam_size=3,
+        vad_parameters={
+            "min_silence_duration_ms": 500,
+            "min_speech_duration_ms": 100,
+            "speech_pad_ms": 200,
+        },
+        beam_size=ASR_BEAM_SIZE,
+        initial_prompt=prompt or None,
         condition_on_previous_text=False,
     )
-    text = "".join([s.text for s in segments]).strip()
-    return text, info
+    recognized = "".join(segment.text for segment in segments).strip()
+    return recognized, info
 
 
-PUNCT_END_RE = re.compile(r"[。．\.!?！？]\s*$")
-
-
-def merge_text(buffer: str, new_text: str) -> str:
-    if not new_text:
-        return buffer
-    if not buffer:
-        return new_text
-    if new_text.startswith(buffer):
-        return new_text
-    if buffer.endswith(new_text):
-        return buffer
-
-    max_overlap = 0
-    max_len = min(len(buffer), len(new_text))
-    for i in range(1, max_len + 1):
-        if buffer[-i:] == new_text[:i]:
-            max_overlap = i
-    if max_overlap > 0:
-        return buffer + new_text[max_overlap:]
-    return f"{buffer} {new_text}".strip()
-
-
-def should_finalize(text: str) -> bool:
-    if not text:
-        return False
-    if len(text) >= MAX_BUFFER_CHARS:
-        return True
-    return bool(PUNCT_END_RE.search(text))
+def build_asr_prompt(previous_final: str) -> str:
+    # Configurable domain vocabulary plus a short preceding FINAL utterance.
+    # Keep context small to limit hallucinations and prevent unbounded prompts.
+    pieces = [ASR_VOCAB_PROMPT]
+    if ASR_PREVIOUS_CONTEXT_CHARS:
+        pieces.append(previous_final[-ASR_PREVIOUS_CONTEXT_CHARS:])
+    return "。".join(piece.strip() for piece in pieces if piece.strip())
 
 
 async def process_audio_queue(queue: asyncio.Queue, websocket: WebSocket) -> None:
-    print("[DEBUG] worker started")
-    text_buffer = ""
-    last_interim = ""
-    last_voice_ts = 0.0
-    last_detected_lang = DEFAULT_SOURCE_LANG
-    last_target_lang = DEFAULT_TARGET_LANG
-    tail_samples = int(PCM_SAMPLE_RATE * RING_TAIL_SEC)
-    audio_tail = np.zeros(0, dtype=np.float32)
-    vad = webrtcvad.Vad(2) if webrtcvad else None
+    utterance = UtteranceBuffer(
+        sample_rate=PCM_SAMPLE_RATE,
+        speech_threshold=ASR_SPEECH_THRESHOLD,
+        min_interim_sec=ASR_MIN_INTERIM_SEC,
+        interim_interval_sec=ASR_INTERIM_INTERVAL_SEC,
+        max_utterance_sec=ASR_MAX_UTTERANCE_SEC,
+    )
+    previous_final = ""
+    previous_interim = ""
+    translation_tasks: set[asyncio.Task] = set()
+    send_lock = asyncio.Lock()
 
-    async def send_result(
-        original_text: str,
-        translated_text: str,
-        source_lang: str,
-        target_lang: str,
-        latency_ms: float,
-        chunk_id: int,
-        is_final: bool,
-    ) -> bool:
-        payload = make_subtitle_json(
-            original_text,
-            translated_text,
-            source_lang,
-            target_lang,
-            latency_ms,
-            chunk_id,
-            is_final,
-        )
+    async def send(payload: dict) -> bool:
         try:
-            await websocket.send_text(payload)
-            kind = "final" if is_final else "interim"
-            print(f"[DEBUG] chunk#{chunk_id} sent {kind} (latency={latency_ms:.1f}ms)")
+            async with send_lock:
+                await websocket.send_text(json.dumps(payload, ensure_ascii=False))
             return True
-        except Exception as e:
-            print(f"[DEBUG] send failed: {e}")
+        except (RuntimeError, WebSocketDisconnect):
+            return False
+        except Exception as exc:
+            print(f"[WARN] WebSocket send failed ({type(exc).__name__})")
             return False
 
-    def webrtc_vad_has_voice(audio_f32: np.ndarray) -> bool:
-        if vad is None:
-            return False
-        pcm16 = (audio_f32 * 32767.0).astype(np.int16).tobytes()
-        frame_len = int(PCM_SAMPLE_RATE * 0.02) * 2  # 20ms * 2 bytes
-        for i in range(0, len(pcm16) - frame_len + 1, frame_len):
-            frame = pcm16[i : i + frame_len]
-            if vad.is_speech(frame, PCM_SAMPLE_RATE):
-                return True
-        return False
+    async def translate_in_background(original: str, source: str, target: str, chunk_id: int) -> None:
+        # Do NOT block Whisper's audio consumer on a Bedrock API call.
+        translated = await asyncio.to_thread(translate_bedrock, original, source, target)
+        if translated:
+            await send({"type": "translation", "chunk_id": chunk_id, "translated": translated})
 
-    while True:
-        try:
-            item = await asyncio.wait_for(queue.get(), timeout=0.3)
-        except asyncio.TimeoutError:
-            if text_buffer and last_voice_ts > 0 and (time.perf_counter() - last_voice_ts) >= FINALIZE_SILENCE_SEC:
-                translated = ""
-                if last_target_lang != NO_TRANSLATE_LANG:
-                    translated = await asyncio.to_thread(
-                        translate_bedrock, text_buffer, last_detected_lang, last_target_lang
-                    )
-                await send_result(
-                    text_buffer,
-                    translated,
-                    last_detected_lang,
-                    last_target_lang,
-                    0.0,
-                    0,
-                    True,
-                )
-                text_buffer = ""
-                last_interim = ""
-            continue
-
-        if item is None:
-            return
-
-        try:
+    try:
+        while True:
+            item = await queue.get()
+            if item is None:
+                break
             chunk_id, pcm_bytes, source_lang, target_lang = item
-            last_target_lang = target_lang
-            start = time.perf_counter()
-            print(f"[DEBUG] worker got chunk#{chunk_id} ({len(pcm_bytes)} bytes)")
-
+            started = time.perf_counter()
             audio = np.frombuffer(pcm_bytes, dtype=np.int16).astype(np.float32) / 32768.0
             if audio.size == 0:
-                print(f"[DEBUG] chunk#{chunk_id} empty audio buffer")
                 continue
 
-            rms = float(np.sqrt(np.mean(np.square(audio))))
-            print(f"[DEBUG] chunk#{chunk_id} rms={rms:.5f}")
-
-            voice_detected = rms >= VAD_RMS_THRESHOLD
-            if vad:
-                voice_detected = webrtc_vad_has_voice(audio)
-                print(f"[DEBUG] chunk#{chunk_id} webrtcvad={voice_detected}")
-
-            if not voice_detected:
-                if text_buffer and last_voice_ts > 0 and (time.perf_counter() - last_voice_ts) >= FINALIZE_SILENCE_SEC:
-                    translated = ""
-                    if last_target_lang != NO_TRANSLATE_LANG:
-                        translated = await asyncio.to_thread(
-                            translate_bedrock, text_buffer, last_detected_lang, last_target_lang
-                        )
-                    await send_result(
-                        text_buffer,
-                        translated,
-                        last_detected_lang,
-                        last_target_lang,
-                        0.0,
-                        chunk_id,
-                        True,
-                    )
-                    text_buffer = ""
-                    last_interim = ""
+            event = utterance.feed(audio)
+            if event is None:
                 continue
-
-            last_voice_ts = time.perf_counter()
-
-            if audio_tail.size > 0:
-                audio_input = np.concatenate([audio_tail, audio])
-            else:
-                audio_input = audio
-
-            if audio.size >= tail_samples:
-                audio_tail = audio[-tail_samples:]
-            else:
-                audio_tail = audio
-
-            whisper_lang = None if source_lang == "auto" else source_lang
-            original, info = await asyncio.to_thread(run_whisper, audio_input, whisper_lang)
-
-            detected_lang = source_lang
-            if source_lang == "auto" and getattr(info, "language", None):
-                detected_lang = info.language
-            last_detected_lang = detected_lang
-
-            if not original:
-                print(f"[DEBUG] chunk#{chunk_id} empty result")
-                continue
-
-            text_buffer = merge_text(text_buffer, original)
-
-            if text_buffer != last_interim:
-                latency_ms = (time.perf_counter() - start) * 1000
-                ok = await send_result(
-                    text_buffer,
-                    "",
-                    detected_lang,
-                    target_lang,
-                    latency_ms,
-                    chunk_id,
-                    False,
+            kind, buffered_audio = event
+            model_lang = None if source_lang == "auto" else source_lang
+            try:
+                original, info = await asyncio.to_thread(
+                    run_whisper, buffered_audio, model_lang, build_asr_prompt(previous_final)
                 )
-                if not ok:
-                    return
-                last_interim = text_buffer
+            except Exception as exc:
+                print(f"[WARN] Whisper inference failed ({type(exc).__name__})")
+                continue
 
-            if should_finalize(text_buffer):
-                translated = ""
-                if target_lang != NO_TRANSLATE_LANG:
-                    translated = await asyncio.to_thread(
-                        translate_bedrock, text_buffer, detected_lang, target_lang
-                    )
-                latency_ms = (time.perf_counter() - start) * 1000
-                ok = await send_result(
-                    text_buffer,
-                    translated,
-                    detected_lang,
-                    target_lang,
-                    latency_ms,
-                    chunk_id,
-                    True,
-                )
-                if not ok:
-                    return
-                text_buffer = ""
-                last_interim = ""
-        except Exception as e:
-            print(f"[DEBUG] worker error on chunk#{item[0] if item else '?'}: {e}")
+            detected_lang = (
+                getattr(info, "language", source_lang) if source_lang == "auto" else source_lang
+            )
+            if kind == "interim":
+                if original and original != previous_interim:
+                    await send(json.loads(make_subtitle_json(
+                        original, "", detected_lang, target_lang,
+                        (time.perf_counter() - started) * 1000, chunk_id, False
+                    )))
+                    previous_interim = original
+                continue
+
+            # Finalize this utterance exactly once; never concatenate competing
+            # Whisper hypotheses as if they were separate chunks of speech.
+            final_text = original or previous_interim
+            previous_interim = ""
+            if not final_text:
+                continue
+            previous_final = final_text
+            ok = await send(json.loads(make_subtitle_json(
+                final_text, "", detected_lang, target_lang,
+                (time.perf_counter() - started) * 1000, chunk_id, True
+            )))
+            if ok and target_lang != NO_TRANSLATE_LANG and BEDROCK_MODEL_ID:
+                task = asyncio.create_task(translate_in_background(
+                    final_text, detected_lang, target_lang, chunk_id
+                ))
+                translation_tasks.add(task)
+                task.add_done_callback(translation_tasks.discard)
+    finally:
+        for task in translation_tasks:
+            task.cancel()
+        if translation_tasks:
+            await asyncio.gather(*translation_tasks, return_exceptions=True)
 
 
 @app.websocket("/ws/audio")

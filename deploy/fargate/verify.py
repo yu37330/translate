@@ -3,6 +3,8 @@
 import ast
 import json
 import re
+import shutil
+import subprocess
 from pathlib import Path
 
 
@@ -28,9 +30,11 @@ def main() -> None:
     assert "new WebSocket" in html
     assert "download_model(" in dockerfile
 
-    # JavaScript構文はNodeがある場合に別途確認:
-    # node --check <(sed ... ) 等の代わりに下記の正規表現を利用して抽出可能
-    assert re.search(r"<script>[\\s\\S]*?</script>", html)
+    # Node.jsがある場合はフロントエンドのJavaScript構文も検証
+    match = re.search(r"<script>([\\s\\S]*?)</script>", html)
+    assert match is not None
+    if shutil.which("node"):
+        subprocess.run(["node", "--check"], input=match.group(1), text=True, check=True)
     print("static checks passed")
 
 

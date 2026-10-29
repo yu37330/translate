@@ -235,6 +235,7 @@ async def process_audio_queue(queue: asyncio.Queue, websocket: WebSocket) -> Non
     )
     previous_final = ""
     previous_interim = ""
+    previous_stable = ""
     agreement = LocalAgreement()
     translation_tasks: set[asyncio.Task] = set()
     send_lock = asyncio.Lock()
@@ -261,7 +262,7 @@ async def process_audio_queue(queue: asyncio.Queue, websocket: WebSocket) -> Non
         source_lang: str, target_lang: str, started: float,
         audio_start_ms: float, audio_end_ms: float,
     ) -> None:
-        nonlocal previous_final, previous_interim
+        nonlocal previous_final, previous_interim, previous_stable
         model_lang = None if source_lang == "auto" else source_lang
         try:
             original, info, rejected_only = await asyncio.to_thread(
@@ -276,20 +277,24 @@ async def process_audio_queue(queue: asyncio.Queue, websocket: WebSocket) -> Non
         # an ID, instead of being treated as new permanent transcript lines.
         utterance_id = f"u{round(audio_start_ms * PCM_SAMPLE_RATE / 1000)}"
         if kind == "interim":
-            if original and original != previous_interim:
-                stable_prefix = agreement.observe(original)
+            stable_prefix = agreement.observe(original) if original else ""
+            # An unchanged hypothesis still counts as a second consistent pass.
+            # Send an update if the stable portion newly appears.
+            if original and (original != previous_interim or stable_prefix != previous_stable):
                 await send(json.loads(make_subtitle_json(
                     original, "", detected_lang, target_lang,
                     (time.perf_counter() - started) * 1000, chunk_id, False,
                     audio_start_ms, audio_end_ms, utterance_id, stable_prefix
                 )))
-                previous_interim = original
+            previous_interim = original or previous_interim
+            previous_stable = stable_prefix
             return
 
         # Re-decode the completed utterance; full-sentence hypotheses replace,
         # rather than string-concatenate, previous partial hypotheses.
         final_text = original or ("" if rejected_only else previous_interim)
         previous_interim = ""
+        previous_stable = ""
         agreement.reset()
         if not final_text:
             return

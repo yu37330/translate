@@ -95,7 +95,7 @@
     </div>
     <div class="settings-row">
       <b>翻訳</b>
-      <label><input type="checkbox" id="translateToggle" disabled> 翻訳する（Fargate版では無効）</label>
+      <label><input type="checkbox" id="translateToggle" disabled> Amazon Bedrockで翻訳（有効時だけ送信）</label>
       <span class="hint">オフにすると文字起こしのみ</span>
     </div>
   </div>
@@ -104,10 +104,10 @@
     <button id="startBtn">Start</button>
     <button id="stopBtn" disabled>Stop</button>
     <button id="clearBtn">履歴クリア</button>
-    <div class="hint">2秒ごとに16kHz PCMを送信。サーバ側でWhisper→翻訳→表示。</div>
+    <div class="hint">2秒ごとに16kHz PCMを送信。WhisperはFargate内で実行します。翻訳・要約を使用すると文字起こしテキストのみBedrockへ送信します。</div>
   </div>
 
-  <div class="hint">Fargate版：翻訳・AI要約は外部データ送信防止のため停止しています。音声認識のみ提供します。社内の情報管理ルールに従って利用してください。</div>
+  <div class="hint" id="bedrockNotice">Bedrock連携はデフォルト無効。BEDROCK_MODEL_ID設定時のみ翻訳・要約を選択できます。利用規定とリージョンを確認してください。</div>
   <div id="statusArea"></div>
 
   <div id="current">
@@ -130,8 +130,8 @@
     <div class="header">
       <span>要約 (AI)</span>
       <div class="buttons">
-        <button id="summarizeBtn" disabled>直近を要約（無効）</button>
-        <button id="fullSummarizeBtn" class="full" disabled>全体を要約（無効）</button>
+        <button id="summarizeBtn" disabled>直近を要約</button>
+        <button id="fullSummarizeBtn" class="full" disabled>全体を要約</button>
       </div>
     </div>
     <div style="padding: 12px 16px; border-bottom: 1px solid #e1bee7; background: #f7f3ff;">
@@ -169,6 +169,7 @@
     let historyData = [];
     let lastSummarizedIndex = 0;
     let summaryCount = 0;
+    let bedrockEnabled = false;
 
     // audio worklet state
     let audioCtx = null;
@@ -264,6 +265,7 @@
     }
 
     async function generateSummary() {
+      if (!bedrockEnabled) return;
       const newHistory = historyData.slice(lastSummarizedIndex);
       if (newHistory.length === 0) {
         alert("要約する新しい履歴がありません");
@@ -275,7 +277,14 @@
       btn.disabled = true; fullBtn.disabled = true; btn.textContent = "生成中...";
       log(`要約リクエスト送信 (${newHistory.length} 件)`, "info");
       try {
-        const res = await fetch("/api/summarize", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ history: newHistory, prompt }) });
+        const res = await fetch("/api/summarize", {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            "Authorization": `Bearer ${document.getElementById("accessToken").value}`
+          },
+          body: JSON.stringify({ history: newHistory, prompt })
+        });
         const result = await res.json();
         if (result.error) throw new Error(result.error);
         summaryCount++;
@@ -287,11 +296,12 @@
         log(`要約エラー: ${err.message}`, "error");
         alert(err.message);
       } finally {
-        btn.disabled = false; fullBtn.disabled = false; btn.textContent = "直近を要約";
+        btn.disabled = !bedrockEnabled; fullBtn.disabled = !bedrockEnabled; btn.textContent = "直近を要約";
       }
     }
 
     async function generateFullSummary() {
+      if (!bedrockEnabled) return;
       if (historyData.length === 0) {
         alert("履歴がありません");
         return;
@@ -302,7 +312,14 @@
       btn.disabled = true; fullBtn.disabled = true; fullBtn.textContent = "生成中...";
       log(`全体要約リクエスト送信 (${historyData.length} 件)`, "info");
       try {
-        const res = await fetch("/api/summarize", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ history: historyData, prompt }) });
+        const res = await fetch("/api/summarize", {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            "Authorization": `Bearer ${document.getElementById("accessToken").value}`
+          },
+          body: JSON.stringify({ history: historyData, prompt })
+        });
         const result = await res.json();
         if (result.error) throw new Error(result.error);
         addSummaryItem(result.summary, "全体要約", true);
@@ -311,7 +328,7 @@
         log(`要約エラー: ${err.message}`, "error");
         alert(err.message);
       } finally {
-        btn.disabled = false; fullBtn.disabled = false; fullBtn.textContent = "全体を要約";
+        btn.disabled = !bedrockEnabled; fullBtn.disabled = !bedrockEnabled; fullBtn.textContent = "全体を要約";
       }
     }
 
@@ -379,7 +396,7 @@
     }
 
     function getTargetLang() {
-      const translateOn = document.getElementById("translateToggle").checked;
+      const translateOn = bedrockEnabled && document.getElementById("translateToggle").checked;
       if (!translateOn) return "none";
       return document.getElementById("targetLang").value;
     }
@@ -497,6 +514,7 @@
             document.getElementById("stopBtn").disabled = false;
             document.querySelectorAll('input[name="audioSource"]').forEach(r => r.disabled = true);
             document.getElementById("sourceLang").disabled = true;
+            document.getElementById("targetLang").disabled = !bedrockEnabled;
             return;
           }
           const label = data.is_final ? "確定" : "暫定";
@@ -540,7 +558,28 @@
       document.getElementById("stopBtn").disabled = true;
       document.querySelectorAll('input[name="audioSource"]').forEach(r => r.disabled = false);
       document.getElementById("sourceLang").disabled = false;
-      document.getElementById("targetLang").disabled = true;
+      document.getElementById("targetLang").disabled = !bedrockEnabled;
+    }
+
+    async function loadFeatures() {
+      try {
+        const res = await fetch("/api/features", { cache: "no-store" });
+        if (!res.ok) throw new Error("config API error");
+        const config = await res.json();
+        bedrockEnabled = config.bedrock_enabled === true;
+      } catch (err) {
+        // 誤った外部送信を防ぐため、失敗時は連携機能を無効のままにする
+        log("Bedrock設定の取得に失敗しました。文字起こし専用で動作します", "error");
+        bedrockEnabled = false;
+      }
+      document.getElementById("translateToggle").disabled = !bedrockEnabled;
+      document.getElementById("targetLang").disabled = !bedrockEnabled;
+      document.getElementById("summarizeBtn").disabled = !bedrockEnabled;
+      document.getElementById("fullSummarizeBtn").disabled = !bedrockEnabled;
+      document.getElementById("bedrockNotice").textContent = bedrockEnabled
+        ? "Bedrock連携の設定があります。翻訳はチェックした場合のみ、要約はボタン押下時のみ文字起こしテキストをAWS Bedrockに送信します。"
+        : "Bedrock未設定：外部AIへの送信はなく、Whisperによる文字起こしだけ利用できます。";
+      updateLabels();
     }
 
     document.getElementById("startBtn").addEventListener("click", start);
@@ -553,6 +592,7 @@
     document.getElementById("translateToggle").addEventListener("change", () => { updateLabels(); sendConfig(); });
 
     updateLabels();
+    loadFeatures();
     log("準備完了", "success");
 
     document.getElementById("summaryPrompt").value =

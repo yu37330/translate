@@ -13,11 +13,13 @@
 
 ## セキュリティ方針（PoC）
 
-- 従来のGoogle翻訳とOpenRouter要約は**コード側で無効化**し、該当ライブラリを依存から除外
+- 従来のGoogle翻訳とOpenRouter要約は**削除**。翻訳・AI要約の文字起こしテキスト送信先はAmazon Bedrock（Converse API）のみ。モデル未設定では両機能を無効化
 - WebSocket接続時、ブラウザーのOriginとHostを照合し、最初のメッセージで`APP_ACCESS_TOKEN`を検証（未設定なら拒否）
 - アクセストークンは環境変数/Secrets Managerから取得。GitやDockerイメージに埋め込まない
 - バイナリ1チャンク最大128 KiB、メモリキュー8件。過負荷時は接続を終了
 - Whisperに渡す音声はプロセスメモリ内で処理。S3への保存機能は未実装
+- 要約API `/api/summarize` はPoCトークンによるHTTP Bearer認証。要約の入力件数/文字数にも上限を設定
+- 翻訳はユーザーがチェックをONにした時のみ、要約はボタンを押した時のみBedrockへ文字起こしテキストを送信（音声は送信しない）
 - `/healthz` はNLB/ECSのヘルスチェック用。認証不要だがネットワーク上のアクセスを制限する
 
 **このトークンはPoC用の共有シークレットであり、会社のSSO/個人認証の代わりにはなりません。** 本番利用時は企業の認証基盤（例: Entra ID、認証済みリバースプロキシ等）を統合し、監査・会議同意・保持ポリシーを確認してください。社内限定NLBであっても暗号化（WSS/TLS）とECS Security Groupを確認してください。現行実装にはユーザー別アクセス制御・接続数制限がありません。
@@ -29,6 +31,24 @@
 ```bash
 python deploy/fargate/verify.py
 ```
+
+## Amazon Bedrockで翻訳・要約する（オプション）
+
+Whisperによる**文字起こしは完全にコンテナ内**、Bedrockには**文字起こし済みのテキストのみ**を送信します。従来のGoogle翻訳・OpenRouterはFargate版では利用しません。
+
+- `BEDROCK_MODEL_ID`: 空欄なら**翻訳・要約とも無効**。AWS環境で利用許可済みのモデルIDまたは推論プロファイルIDを設定（例は固定しません。利用可能なIDはアカウント・リージョン・契約で異なります）
+- `BEDROCK_REGION`: Bedrock Runtimeを呼び出すリージョン。デフォルトは`ap-northeast-1`
+- 必要IAM権限: **ECS task role** に対象のモデル/推論プロファイルに対する `bedrock:InvokeModel`。実行ロール（image pull用）ではなくタスクロールへ設定
+- Private subnetからBedrockへ外向き通信する場合、NAT経由か `com.amazonaws.ap-northeast-1.bedrock-runtime` のインターフェースVPCエンドポイント（Private DNS有効）を設置。Endpoint用SGはFargate SGからの443を許可
+- クロスリージョン推論プロファイルを使う場合、送信テキストが別のAWSリージョンへルーティングされる可能性があるため、社内データポリシーで許可リージョンを確認。必要な権限も利用プロファイルのルーティング先に合わせて設定
+- Bedrockに接続してもGoogle翻訳/OpenRouterには送信されません。ただしCloudWatch等のログ・ネットワーク・モデルの利用許可は別途確認してください。AWS側の推論利用料金が発生します
+- モデルIDを設定しても、初期状態では翻訳チェックがOFF。要約もボタン操作をした時のみ送信します
+
+AWS公式：[Converse API](https://docs.aws.amazon.com/bedrock/latest/userguide/conversation-inference.html) / [Bedrock VPC endpoints](https://docs.aws.amazon.com/bedrock/latest/userguide/vpc-interface-endpoints.html)。
+
+### ローカル実行でBedrockの動作を確認する
+
+ローカル端末にAWS認証情報を用意済みの場合のみ、コンテナへAWSの認証情報を適切に渡して `BEDROCK_MODEL_ID` を設定してください。**アクセスキーをDockerfileやGitに埋め込まない**こと。Fargateではタスクロールを使うためアクセスキーは不要です。
 
 ## ローカル起動
 
@@ -85,11 +105,14 @@ docker push "$ECR_URI:small-poc"
 ## PoC確認項目
 
 - [ ] `docker build` が成功し `/healthz` が200を返す
+- [ ] BedrockのConverse API翻訳・要約を承認済みモデルで実機検証
 - [ ] ブラウザーが正しいトークンで接続し、誤ったトークンでは音声を送れない
 - [ ] WSSで2秒チャンクが送信され、認識結果が返る
 - [ ] Teamsの相手音声が取れるか（特にデスクトップ版）をWindows/Edgeなど実機で確認
 - [ ] 文字起こし遅延、CPU/メモリ使用率、キュー満杯時の動作を確認
-- [ ] Dockerビルド時を除き、外部翻訳・要約へ会議データを送らないことを通信ログで確認
+- [ ] モデル未設定時に翻訳・要約が無効であることを確認
+- [ ] モデル設定時にGoogle翻訳・OpenRouterには一切接続せず、Bedrock Runtimeだけが必要になることを確認
+- [ ] IAMロールとPrivateLink、リージョン、Bedrockのモデルアクセス権を実環境で検証
 - [ ] 自分のマイク＋相手音声を同時取得したい場合は別途ミキシング実装を追加
 
 ## サイズ・コスト

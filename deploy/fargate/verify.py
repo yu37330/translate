@@ -29,6 +29,7 @@ def main() -> None:
     assert "cell.textContent = value" in html
     assert "new WebSocket" in html
     assert "download_model(" in dockerfile
+    assert "COPY app.py bedrock_text.py ." in dockerfile
     assert 'BEDROCK_MODEL_ID' in source
     assert 'translate_bedrock' in source
     assert 'bedrock:InvokeModel' in (base / "README.md").read_text(encoding="utf-8")

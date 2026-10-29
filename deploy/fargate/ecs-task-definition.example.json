@@ -27,6 +27,14 @@
         {
           "name": "ASR_CPU_THREADS",
           "value": "4"
+        },
+        {
+          "name": "BEDROCK_MODEL_ID",
+          "value": ""
+        },
+        {
+          "name": "BEDROCK_REGION",
+          "value": "ap-northeast-1"
         }
       ],
       "secrets": [

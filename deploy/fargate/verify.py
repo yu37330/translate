@@ -29,6 +29,15 @@ def main() -> None:
     assert "cell.textContent = value" in html
     assert "new WebSocket" in html
     assert "download_model(" in dockerfile
+    assert "COPY app.py bedrock_text.py ." in dockerfile
+    assert 'BEDROCK_MODEL_ID' in source
+    assert 'translate_bedrock' in source
+    assert 'bedrock:InvokeModel' in (base / "README.md").read_text(encoding="utf-8")
+    bedrock = (base / "bedrock_text.py").read_text(encoding="utf-8")
+    ast.parse(bedrock, filename="bedrock_text.py")
+    assert 'bedrock-runtime' in bedrock
+    assert '.converse(' in bedrock
+    assert 'Authorization' in html
 
     # Node.jsがある場合はフロントエンドのJavaScript構文も検証
     match = re.search(r"<script>(.*?)</script>", html, flags=re.DOTALL)

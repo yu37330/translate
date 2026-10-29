@@ -166,6 +166,7 @@
     let stream = null;
     let ws = null;
     let isRecording = false;
+    let finishPending = false;
     let historyData = [];
     let lastSummarizedIndex = 0;
     let summaryCount = 0;
@@ -529,6 +530,15 @@
             document.getElementById("targetLang").disabled = !bedrockEnabled;
             return;
           }
+          if (data.type === "finished") {
+            finishPending = false;
+            const closing = ws;
+            ws = null;
+            if (closing) closing.close();
+            document.getElementById("startBtn").disabled = false;
+            setStatus("停止しました（最後の発話も確定済み）", "");
+            return;
+          }
           if (data.type === "translation") {
             const index = historyData.findIndex(item => item.chunk_id === data.chunk_id);
             if (index >= 0) {
@@ -559,8 +569,12 @@
 
       ws.onclose = () => {
         log("WebSocket closed", "info");
-        // 利用者がStopした場合は正常終了とし、予期しない切断時だけエラー表示する
-        if (isRecording || stream) {
+        if (finishPending) {
+          finishPending = false;
+          ws = null;
+          document.getElementById("startBtn").disabled = false;
+          setStatus("接続が終了しました（最終確定は未確認）", "error");
+        } else if (isRecording || stream) {
           stop();
           setStatus("接続が終了しました（認証・ネットワーク・負荷を確認してください）", "error");
         }
@@ -568,18 +582,41 @@
     }
 
     function stop() {
-      log("停止", "info");
-      setStatus("停止しました", "");
+      const shouldFinish = isRecording && ws && ws.readyState === WebSocket.OPEN;
+      const closingSocket = ws;
       isRecording = false;
+      log("停止", "info");
 
       if (workletNode) { workletNode.port.onmessage = null; workletNode.disconnect(); workletNode = null; }
       if (audioCtx) { audioCtx.close(); audioCtx = null; }
+
+      if (shouldFinish) {
+        // A partially filled (<2 sec) PCM chunk also contains speech: never discard it.
+        if (pcmBuffer.length > 0) ws.send(new Int16Array(pcmBuffer).buffer);
+        ws.send(JSON.stringify({type: "finish"}));
+        finishPending = true;
+        setStatus("最後の発話を確定中...", "working");
+        // Network/model failures should not keep the Start button disabled forever.
+        setTimeout(() => {
+          if (finishPending && ws === closingSocket) {
+            finishPending = false;
+            ws.close();
+            ws = null;
+            document.getElementById("startBtn").disabled = false;
+            setStatus("最終確定がタイムアウトしました", "error");
+          }
+        }, 30000);
+      } else {
+        finishPending = false;
+        if (ws) ws.close();
+        ws = null;
+        setStatus("停止しました", "");
+      }
       pcmBuffer = []; rmsSum = 0; rmsCount = 0;
 
       if (stream) { stream.getTracks().forEach(t => t.stop()); stream = null; }
-      if (ws) { ws.close(); ws = null; }
 
-      document.getElementById("startBtn").disabled = false;
+      document.getElementById("startBtn").disabled = Boolean(shouldFinish);
       document.getElementById("stopBtn").disabled = true;
       document.querySelectorAll('input[name="audioSource"]').forEach(r => r.disabled = false);
       document.getElementById("sourceLang").disabled = false;

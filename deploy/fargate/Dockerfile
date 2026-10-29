@@ -19,7 +19,7 @@ RUN python -c "from faster_whisper.utils import download_model; download_model('
 ENV ASR_MODEL_PATH=/opt/models/${MODEL_SIZE} \
     ASR_CPU_THREADS=4
 
-COPY app.py bedrock_text.py .
+COPY app.py bedrock_text.py streaming_asr.py .
 COPY templates/ ./templates/
 
 # コンテナを非rootで実行

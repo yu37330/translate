@@ -95,6 +95,36 @@ class UtteranceBufferTests(unittest.TestCase):
         self.assertFalse(buffer.active)
         self.assertIsNone(buffer.flush())
 
+    def test_audio_timestamps_advance_from_pcm_samples(self):
+        buffer = UtteranceBuffer(preroll_sec=0.3)
+        self.assertIsNone(buffer.feed(pcm(0.5, 0)))
+        self.assertIsNone(buffer.feed(pcm(0.5)))
+        self.assertIsNone(buffer.feed(pcm(0.5, 0)))
+        event = buffer.feed(pcm(0.5, 0))
+        self.assertEqual(event[0], "final")
+        self.assertEqual(buffer.total_received_samples, 32000)
+        self.assertEqual(buffer.last_event_start_sample, 3200)  # 0.2s of quiet preroll
+        self.assertEqual(buffer.last_event_end_sample, 32000)
+        self.assertIsNone(buffer.feed(pcm(0.5, 0)))
+        self.assertEqual(buffer.last_event_end_sample, 32000)
+
+    def test_silence_duration_uses_pcm_clock_and_survives_final_reset(self):
+        buffer = UtteranceBuffer()
+        self.assertIsNone(buffer.feed(pcm(0.5)))
+        buffer.feed(pcm(1.0, 0))  # closes first utterance
+        for _ in range(6):
+            buffer.feed(pcm(0.5, 0))
+        self.assertGreaterEqual(buffer.silence_since_voice_sec, 3.0)
+        buffer.feed(pcm(0.5))
+        self.assertEqual(buffer.silence_since_voice_sec, 0.0)
+
+    def test_flush_tracks_last_time_range(self):
+        buffer = UtteranceBuffer()
+        buffer.feed(pcm(0.5))
+        buffer.flush()
+        self.assertEqual(buffer.last_event_start_sample, 0)
+        self.assertEqual(buffer.last_event_end_sample, 8000)
+
     def test_new_speech_after_final_is_independent(self):
         buffer = UtteranceBuffer()
         buffer.feed(pcm(2))

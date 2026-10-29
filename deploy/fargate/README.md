@@ -34,6 +34,22 @@
 
 **注意事項:** これは精度向上を狙った実装ですが、実際のCER/WERや遅延改善は未計測です。長いチャンクは推論コストが増えます。Silero VADも含めて小声・雑音・無音時の誤認識を確認してください。専門用語プロンプトは誤補完や幻覚を招く場合があるため、原音との突き合わせが必要です。ユーザー別メモリ・話者識別・会議録音保存は追加していません。
 
+## Vexaのノウハウから取り入れた字幕安定化（第三弾）
+
+GitHub [Vexa](https://github.com/Vexa-ai/vexa) のmixed-pipeline / speaker-streamsの設計を参考に、依存関係・ボット・話者分離は**移植せず**、Fargate単一コンテナのPythonで以下を再実装しました。
+
+- **LocalAgreement-2（表示専用）**：同じ発話について連続する2回のWhisper仮説から日本語も使える文字単位の共通接頭辞を抽出し、UIで下線表示。**確定保存は従来どおり発話終了時だけ**。日本語のスペース区切りに依存せず、後続文字を暫定扱いにする。早期確定（真のVexa LocalAgreement）は実装していない
+- **正確な音声時間**：ブラウザー音声を16kHzサンプル単位で積算し、各発話に`audio_start_ms`/`audio_end_ms`と`utterance_id`を付与。暫定字幕と最終字幕の音声区間を共有し、同じ`utterance_id`の最終字幕重複保存を防ぐ。これは**音声区間の時刻**であって、Whisper単語タイムスタンプや話者分離ではない
+- **無音でプロンプトリセット**：`ASR_CONTEXT_RESET_SEC=3.0`（既定）以上の連続無音をPCM音声時間から計測し、前の確定発話を次のWhisperプロンプトに引き継がない。専門用語の静的ヒントは残す
+- **慎重な幻覚抑制**：Whisperの`no_speech_prob >= 0.95` と `avg_logprob <= -1.1` が**同時に成立するセグメントのみ**除外。反復フレーズはテキストをログに出さず件数観察だけで、削除しない。「はい」「そうですね」など正当な短い応答の一律削除はしない
+- **リプレイ評価**：`replay_asr.py`でローカルの承認済みPCM WAVを0.5秒刻みで通し、確定文字起こしCER、発話数、暫定一致イベント、RTFを集計。**音声・文字起こしの本文は出力しない**。AWSやHugging Faceへの送信もない。ネットワーク/ブラウザーの遅延は含まれない
+
+| 環境変数 | 既定 | 用途 |
+| --- | --- | --- |
+| `ASR_CONTEXT_RESET_SEC` | `3.0` | 前の確定文章の音声文脈をクリアする無音秒数 |
+
+**改善効果は未測定**です。Vexa独自の話者識別、早期確定、Pyannote推論、単語アラインメントはまだ導入していません。文字ベースのLocalAgreementは表示上の参考情報であり、誤った字幕を確定済みと扱わないようにしています。
+
 ## セキュリティ方針（PoC）
 
 - 従来のGoogle翻訳とOpenRouter要約は**削除**。翻訳・AI要約の文字起こしテキスト送信先はAmazon Bedrock（Converse API）のみ。モデル未設定では両機能を無効化
@@ -61,9 +77,11 @@ python -m unittest -v test_bedrock_text
 # Node.jsがあれば16k/48kリサンプリングのJSテストも実施
 node test_audio_worklet.js
 # 正解テキストとの比較評価（モデル不要）
-python -m unittest -v test_accuracy_metrics
+python -m unittest -v test_accuracy_metrics test_vexa_quality test_replay_asr
 # モデルを使ってCER / 専門用語再現率 / リアルタイム倍率を測る場合
 python benchmark_asr.py --manifest C:/evaluation/manifest.jsonl --model-path C:/models/small --terms-file C:/evaluation/terms.txt
+# 発話境界・字幕暫定確定も含めたCPU replay評価（オフライン）
+python replay_asr.py --manifest C:/evaluation/manifest.jsonl --model-path C:/models/small
 ```
 
 ## 精度評価：会議データを外部送信しない方法
@@ -158,6 +176,8 @@ docker push "$ECR_URI:small-poc"
 - [ ] WSSで0.5秒チャンクが送信され、認識結果が返る
 - [ ] Teamsの相手音声が取れるか（特にデスクトップ版）をWindows/Edgeなど実機で確認
 - [ ] 文字起こし遅延、CPU/メモリ使用率、キュー満杯時の動作を確認
+- [ ] Vexa参考の暫定下線表示、発話タイムスタンプ、3秒無音後の文脈リセット、低確度判定を同じ音源で検証
+- [ ] replay_asr.py と benchmark_asr.py でCER/RTFを比較し、CER悪化やCPU過負荷なら変更を調整・ロールバック
 - [ ] 0.5秒以下の発話・語頭の小声・無音・連続発話・Stop直後の字幕確定を確認
 - [ ] 変更前後の同一会議音声でCER、専門用語・数字正答率、発話欠落、P50/P95字幕遅延を測定
 - [ ] 翻訳ONでもWhisper処理がBedrock応答待ちに塞がれないことを確認

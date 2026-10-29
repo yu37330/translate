@@ -39,6 +39,13 @@ def main() -> None:
     assert '"type": "finished"' in source
     assert "new Int16Array(pcmBuffer).buffer" in html
     assert "VAD_THRESHOLD" not in html
+    assert "CHUNK_SEC = 0.5" in html
+    assert "ASR_HOTWORDS" in source
+    assert "ASR_END_SILENCE_SEC" in source
+    assert "ASR_PREROLL_SEC" in source
+    assert "self._preroll" in streaming
+    for path in ("accuracy_metrics.py", "benchmark_asr.py", "test_accuracy_metrics.py"):
+        ast.parse((base / path).read_text(encoding="utf-8"), filename=path)
     assert '"type": "translation"' in source
     assert 'BEDROCK_MODEL_ID' in source
     assert 'translate_bedrock' in source

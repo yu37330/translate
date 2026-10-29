@@ -235,60 +235,79 @@ async def process_audio_queue(queue: asyncio.Queue, websocket: WebSocket) -> Non
         if translated:
             await send({"type": "translation", "chunk_id": chunk_id, "translated": translated})
 
+    async def recognize(
+        kind: str, buffered_audio: np.ndarray, chunk_id: int,
+        source_lang: str, target_lang: str, started: float,
+    ) -> None:
+        nonlocal previous_final, previous_interim
+        model_lang = None if source_lang == "auto" else source_lang
+        try:
+            original, info = await asyncio.to_thread(
+                run_whisper, buffered_audio, model_lang, build_asr_prompt(previous_final)
+            )
+        except Exception as exc:
+            print(f"[WARN] Whisper inference failed ({type(exc).__name__})")
+            return
+
+        detected_lang = getattr(info, "language", source_lang) if source_lang == "auto" else source_lang
+        if kind == "interim":
+            if original and original != previous_interim:
+                await send(json.loads(make_subtitle_json(
+                    original, "", detected_lang, target_lang,
+                    (time.perf_counter() - started) * 1000, chunk_id, False
+                )))
+                previous_interim = original
+            return
+
+        # Re-decode the completed utterance; full-sentence hypotheses replace,
+        # rather than string-concatenate, previous partial hypotheses.
+        final_text = original or previous_interim
+        previous_interim = ""
+        if not final_text:
+            return
+        previous_final = final_text
+        ok = await send(json.loads(make_subtitle_json(
+            final_text, "", detected_lang, target_lang,
+            (time.perf_counter() - started) * 1000, chunk_id, True
+        )))
+        if ok and target_lang != NO_TRANSLATE_LANG and BEDROCK_MODEL_ID:
+            task = asyncio.create_task(translate_in_background(
+                final_text, detected_lang, target_lang, chunk_id
+            ))
+            translation_tasks.add(task)
+            task.add_done_callback(translation_tasks.discard)
+
+    graceful_finish = False
+    last_source_lang = DEFAULT_SOURCE_LANG
+    last_target_lang = DEFAULT_TARGET_LANG
+    last_chunk_id = 0
     try:
         while True:
             item = await queue.get()
             if item is None:
+                leftover = utterance.flush()
+                if leftover is not None:
+                    await recognize(
+                        "final", leftover, last_chunk_id,
+                        last_source_lang, last_target_lang, time.perf_counter()
+                    )
+                graceful_finish = True
                 break
+
             chunk_id, pcm_bytes, source_lang, target_lang = item
+            last_chunk_id = chunk_id
+            last_source_lang = source_lang
+            last_target_lang = target_lang
             started = time.perf_counter()
             audio = np.frombuffer(pcm_bytes, dtype=np.int16).astype(np.float32) / 32768.0
-            if audio.size == 0:
-                continue
-
             event = utterance.feed(audio)
             if event is None:
                 continue
             kind, buffered_audio = event
-            model_lang = None if source_lang == "auto" else source_lang
-            try:
-                original, info = await asyncio.to_thread(
-                    run_whisper, buffered_audio, model_lang, build_asr_prompt(previous_final)
-                )
-            except Exception as exc:
-                print(f"[WARN] Whisper inference failed ({type(exc).__name__})")
-                continue
-
-            detected_lang = (
-                getattr(info, "language", source_lang) if source_lang == "auto" else source_lang
-            )
-            if kind == "interim":
-                if original and original != previous_interim:
-                    await send(json.loads(make_subtitle_json(
-                        original, "", detected_lang, target_lang,
-                        (time.perf_counter() - started) * 1000, chunk_id, False
-                    )))
-                    previous_interim = original
-                continue
-
-            # Finalize this utterance exactly once; never concatenate competing
-            # Whisper hypotheses as if they were separate chunks of speech.
-            final_text = original or previous_interim
-            previous_interim = ""
-            if not final_text:
-                continue
-            previous_final = final_text
-            ok = await send(json.loads(make_subtitle_json(
-                final_text, "", detected_lang, target_lang,
-                (time.perf_counter() - started) * 1000, chunk_id, True
-            )))
-            if ok and target_lang != NO_TRANSLATE_LANG and BEDROCK_MODEL_ID:
-                task = asyncio.create_task(translate_in_background(
-                    final_text, detected_lang, target_lang, chunk_id
-                ))
-                translation_tasks.add(task)
-                task.add_done_callback(translation_tasks.discard)
+            await recognize(kind, buffered_audio, chunk_id, source_lang, target_lang, started)
     finally:
+        if graceful_finish and translation_tasks:
+            await asyncio.wait(translation_tasks, timeout=8)
         for task in translation_tasks:
             task.cancel()
         if translation_tasks:
@@ -343,6 +362,14 @@ async def ws_audio(websocket: WebSocket):
                 text_msg = message["text"]
                 try:
                     data = json.loads(text_msg)
+                    if data.get("type") == "finish":
+                        # Preserve the last partial (<2-second) sound and finalize
+                        # the utterance before sending the completion ACK.
+                        await queue.put(None)
+                        await worker
+                        await websocket.send_text(json.dumps({"type": "finished"}))
+                        await websocket.close(code=1000)
+                        return
                     if data.get("type") == "config":
                         source_lang = data.get("source_lang", DEFAULT_SOURCE_LANG)
                         if source_lang not in ("auto", "ja", "en", "zh", "ko", "es", "fr", "de"):

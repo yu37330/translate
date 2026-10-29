@@ -413,7 +413,11 @@
       `;
       const blob = new Blob([workletCode], { type: "application/javascript" });
       const url = URL.createObjectURL(blob);
-      await audioCtx.audioWorklet.addModule(url);
+      try {
+        await audioCtx.audioWorklet.addModule(url);
+      } finally {
+        URL.revokeObjectURL(url);
+      }
       const source = audioCtx.createMediaStreamSource(stream);
       workletNode = new AudioWorkletNode(audioCtx, 'pcm-collector');
       const silentGain = audioCtx.createGain();
@@ -464,6 +468,7 @@
         log("オーディオ準備OK", "success");
       } catch (e) {
         log(`エラー: ${e.message}`, "error");
+        stop();
         setStatus("音声取得に失敗", "error");
         return;
       }
@@ -505,15 +510,17 @@
 
       ws.onerror = () => {
         log("WebSocket error", "error");
-        setStatus("接続エラー", "error");
         stop();
+        setStatus("接続エラー", "error");
       };
 
       ws.onclose = () => {
         log("WebSocket closed", "info");
-        setStatus("接続が終了しました（認証・ネットワーク・負荷を確認してください）", "error");
-        if (isRecording) stop();
-        else if (stream) { stream.getTracks().forEach(t => t.stop()); stream = null; }
+        // 利用者がStopした場合は正常終了とし、予期しない切断時だけエラー表示する
+        if (isRecording || stream) {
+          stop();
+          setStatus("接続が終了しました（認証・ネットワーク・負荷を確認してください）", "error");
+        }
       };
     }
 
@@ -533,7 +540,7 @@
       document.getElementById("stopBtn").disabled = true;
       document.querySelectorAll('input[name="audioSource"]').forEach(r => r.disabled = false);
       document.getElementById("sourceLang").disabled = false;
-      document.getElementById("targetLang").disabled = false;
+      document.getElementById("targetLang").disabled = true;
     }
 
     document.getElementById("startBtn").addEventListener("click", start);

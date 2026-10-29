@@ -16,7 +16,6 @@ from fastapi.templating import Jinja2Templates
 from faster_whisper import WhisperModel
 from pydantic import BaseModel
 
-from bedrock_text import BEDROCK_MODEL_ID, generate_text, translate_text
 
 try:
     import webrtcvad  # type: ignore
@@ -25,6 +24,9 @@ except Exception:
 
 # ローカル実行時は同じフォルダの .env を読み込む。
 load_dotenv(Path(__file__).with_name('.env'))
+
+# .env読み込み後にBedrockの設定値を確定する
+from bedrock_text import BEDROCK_MODEL_ID, generate_text, translate_text
 
 # ---------- Configuration ----------
 DEFAULT_SOURCE_LANG = "ja"

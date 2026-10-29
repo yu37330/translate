@@ -29,7 +29,17 @@ def main() -> None:
     assert "cell.textContent = value" in html
     assert "new WebSocket" in html
     assert "download_model(" in dockerfile
-    assert "COPY app.py bedrock_text.py ." in dockerfile
+    assert "COPY app.py bedrock_text.py streaming_asr.py ." in dockerfile
+    streaming = (base / "streaming_asr.py").read_text(encoding="utf-8")
+    ast.parse(streaming, filename="streaming_asr.py")
+    ast.parse((base / "test_streaming_asr.py").read_text(encoding="utf-8"), filename="test_streaming_asr.py")
+    assert "UtteranceBuffer" in source
+    assert "vad_parameters=" in source
+    assert "ASR_VOCAB_PROMPT" in source
+    assert '"type": "finished"' in source
+    assert "new Int16Array(pcmBuffer).buffer" in html
+    assert "VAD_THRESHOLD" not in html
+    assert '"type": "translation"' in source
     assert 'BEDROCK_MODEL_ID' in source
     assert 'translate_bedrock' in source
     assert 'bedrock:InvokeModel' in (base / "README.md").read_text(encoding="utf-8")
@@ -43,7 +53,7 @@ def main() -> None:
     match = re.search(r"<script>(.*?)</script>", html, flags=re.DOTALL)
     assert match is not None
     if shutil.which("node"):
-        subprocess.run(["node", "--check"], input=match.group(1), text=True, check=True)
+        subprocess.run(["node", "--check"], input=match.group(1), text=True, encoding="utf-8", check=True)
     print("static checks passed")
 
 

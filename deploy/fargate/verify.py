@@ -24,7 +24,7 @@ def main() -> None:
 
     assert 'APP_ACCESS_TOKEN = os.getenv("APP_ACCESS_TOKEN", "")' in source
     assert "secrets.compare_digest" in source
-    assert 'MAX_AUDIO_QUEUE_CHUNKS = 8' in source
+    assert 'MAX_AUDIO_QUEUE_CHUNKS = 32' in source
     assert '@app.get("/healthz")' in source
     assert "cell.textContent = value" in html
     assert "new WebSocket" in html

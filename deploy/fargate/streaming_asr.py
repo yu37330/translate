@@ -47,6 +47,14 @@ class UtteranceBuffer:
         trailing = min(audio.size, (n_frames - int(voiced[-1]) - 1) * frame_size)
         return True, trailing
 
+    def flush(self) -> np.ndarray | None:
+        """Return the last in-progress utterance when a user stops recording."""
+        if not self.active:
+            return None
+        audio = np.concatenate(self._chunks)
+        self.reset()
+        return audio
+
     def feed(self, audio: np.ndarray) -> tuple[str, np.ndarray] | None:
         """Return ('interim'|'final', full utterance audio), or None.
 

@@ -54,6 +54,22 @@ class UtteranceBufferTests(unittest.TestCase):
         self.assertEqual(buffer.feed(pcm(2))[0], "final")
         self.assertFalse(buffer.active)
 
+    def test_half_second_pcm_packets_finalize_on_silence(self):
+        buffer = UtteranceBuffer(end_silence_sec=0.8, preroll_sec=0.3)
+        # The current browser sends 0.5-second PCM packets over WSS.
+        self.assertIsNone(buffer.feed(pcm(0.5)))
+        self.assertIsNone(buffer.feed(pcm(0.5)))
+        self.assertIsNone(buffer.feed(pcm(0.5, 0)))
+        event = buffer.feed(pcm(0.5, 0))
+        self.assertEqual(event[0], "final")
+        self.assertEqual(event[1].size, int(2.0 * 16000))
+
+    def test_short_utterance_and_stop_does_not_lose_words(self):
+        buffer = UtteranceBuffer()
+        self.assertIsNone(buffer.feed(pcm(0.5)))
+        flushed = buffer.flush()
+        self.assertEqual(flushed.size, 8000)
+
     def test_preroll_preserves_quiet_onset(self):
         buffer = UtteranceBuffer(preroll_sec=0.3)
         quiet_onset = np.full(int(0.5 * 16000), 0.0002, dtype=np.float32)

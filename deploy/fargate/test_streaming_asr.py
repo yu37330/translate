@@ -54,6 +54,15 @@ class UtteranceBufferTests(unittest.TestCase):
         self.assertEqual(buffer.feed(pcm(2))[0], "final")
         self.assertFalse(buffer.active)
 
+    def test_flush_short_speech_on_stop(self):
+        buffer = UtteranceBuffer()
+        self.assertIsNone(buffer.feed(pcm(2)))
+        remaining = buffer.flush()
+        self.assertIsNotNone(remaining)
+        self.assertEqual(remaining.size, 2 * 16000)
+        self.assertFalse(buffer.active)
+        self.assertIsNone(buffer.flush())
+
     def test_new_speech_after_final_is_independent(self):
         buffer = UtteranceBuffer()
         buffer.feed(pcm(2))

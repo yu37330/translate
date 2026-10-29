@@ -17,11 +17,6 @@ from faster_whisper import WhisperModel
 from pydantic import BaseModel
 
 
-try:
-    import webrtcvad  # type: ignore
-except Exception:
-    webrtcvad = None
-
 # ローカル実行時は同じフォルダの .env を読み込む。
 load_dotenv(Path(__file__).with_name('.env'))
 
@@ -41,6 +36,9 @@ ASR_COMPUTE_TYPE = "int8"
 ASR_CPU_THREADS = int(os.getenv("ASR_CPU_THREADS", "4"))
 ASR_BEAM_SIZE = min(8, max(1, int(os.getenv("ASR_BEAM_SIZE", "3"))))
 ASR_SPEECH_THRESHOLD = float(os.getenv("ASR_SPEECH_THRESHOLD", "0.0006"))
+ASR_END_SILENCE_SEC = float(os.getenv("ASR_END_SILENCE_SEC", "0.8"))
+ASR_PREROLL_SEC = float(os.getenv("ASR_PREROLL_SEC", "0.3"))
+ASR_HOTWORDS = os.getenv("ASR_HOTWORDS", "").strip()[:300]
 ASR_VOCAB_PROMPT = os.getenv("ASR_VOCAB_PROMPT", "").strip()[:500]
 ASR_PREVIOUS_CONTEXT_CHARS = min(160, max(0, int(os.getenv("ASR_PREVIOUS_CONTEXT_CHARS", "80"))))
 ASR_MIN_INTERIM_SEC = float(os.getenv("ASR_MIN_INTERIM_SEC", "4"))
@@ -48,15 +46,10 @@ ASR_INTERIM_INTERVAL_SEC = float(os.getenv("ASR_INTERIM_INTERVAL_SEC", "4"))
 ASR_MAX_UTTERANCE_SEC = float(os.getenv("ASR_MAX_UTTERANCE_SEC", "12"))
 APP_ACCESS_TOKEN = os.getenv("APP_ACCESS_TOKEN", "")
 MAX_AUDIO_CHUNK_BYTES = 128_000
-MAX_AUDIO_QUEUE_CHUNKS = 8
+MAX_AUDIO_QUEUE_CHUNKS = 32
 
 PCM_SAMPLE_RATE = 16000
-CHUNK_SEC = 2.0
-VAD_RMS_THRESHOLD = 0.0008  # simple energy gate, tuned for int16 PCM
-FINALIZE_SILENCE_SEC = 1.2
-MAX_BUFFER_CHARS = 120
-RING_TAIL_SEC = 0.5
-
+CHUNK_SEC = 0.5
 # 音声認識はコンテナ内で実行し、LLMを有効化した場合のみBedrockへ認識文字列を送る
 app = FastAPI()
 templates = Jinja2Templates(directory="templates")
@@ -190,6 +183,7 @@ def run_whisper(audio: np.ndarray, language: Optional[str], prompt: str) -> Tupl
         },
         beam_size=ASR_BEAM_SIZE,
         initial_prompt=prompt or None,
+        hotwords=ASR_HOTWORDS or None,
         condition_on_previous_text=False,
     )
     recognized = "".join(segment.text for segment in segments).strip()
@@ -209,6 +203,8 @@ async def process_audio_queue(queue: asyncio.Queue, websocket: WebSocket) -> Non
     utterance = UtteranceBuffer(
         sample_rate=PCM_SAMPLE_RATE,
         speech_threshold=ASR_SPEECH_THRESHOLD,
+        end_silence_sec=ASR_END_SILENCE_SEC,
+        preroll_sec=ASR_PREROLL_SEC,
         min_interim_sec=ASR_MIN_INTERIM_SEC,
         interim_interval_sec=ASR_INTERIM_INTERVAL_SEC,
         max_utterance_sec=ASR_MAX_UTTERANCE_SEC,

@@ -104,7 +104,7 @@
     <button id="startBtn">Start</button>
     <button id="stopBtn" disabled>Stop</button>
     <button id="clearBtn">履歴クリア</button>
-    <div class="hint">2秒ごとに16kHz PCMを送信。サーバーは発話ごとに約4〜12秒の文脈を使って認識します。翻訳・要約を使用すると文字起こしテキストのみBedrockへ送信します。</div>
+    <div class="hint">0.5秒ごとに16kHz PCMを送信。サーバーは発話ごとに最大12秒の文脈を使って認識します。翻訳・要約を使用すると文字起こしテキストのみBedrockへ送信します。</div>
   </div>
 
   <div class="hint" id="bedrockNotice">Bedrock連携はデフォルト無効。BEDROCK_MODEL_ID設定時のみ翻訳・要約を選択できます。利用規定とリージョンを確認してください。</div>
@@ -148,7 +148,7 @@
 
   <script>
     const SAMPLE_RATE = 16000;
-    const CHUNK_SEC = 2;
+    const CHUNK_SEC = 0.5;
     // Do not discard low-volume audio in the browser. Server owns endpointing.
 
     const LANG_NAMES = {

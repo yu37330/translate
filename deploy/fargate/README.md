@@ -50,9 +50,13 @@
 
 ```bash
 python deploy/fargate/verify.py
-# numpyがインストール済みの環境で、合成音声のみのユニットテストを実施
+# numpyがインストール済みなら、合成音声のみのユニットテストを実施
 cd deploy/fargate
-python -m unittest test_streaming_asr test_bedrock_text
+python -m unittest -v test_streaming_asr
+# requirements.txtの依存がインストール済みならBedrockのモックテストも実行可
+python -m unittest -v test_bedrock_text
+# Node.jsがあれば16k/48kリサンプリングのJSテストも実施
+node test_audio_worklet.js
 ```
 
 ## Amazon Bedrockで翻訳・要約する（オプション）

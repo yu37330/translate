@@ -217,13 +217,31 @@
         current.classList.add("interim");
       }
 
-      document.getElementById("currentOriginal").textContent = data.original;
+      const transcriptNode = document.getElementById("currentOriginal");
+      const stable = !data.is_final && typeof data.stable_prefix === "string"
+        && (data.original || "").startsWith(data.stable_prefix) ? data.stable_prefix : "";
+      // 'Stable' is an advisory LocalAgreement-2 comparison, NOT a final commitment.
+      // The final utterance can still change; only is_final gets stored in history.
+      if (stable) {
+        const prefix = document.createElement("span");
+        prefix.style.textDecoration = "underline";
+        prefix.title = "直近2回の認識が一致した暫定部分（確定ではありません）";
+        prefix.textContent = stable;
+        const tail = document.createElement("span");
+        tail.textContent = (data.original || "").slice(stable.length);
+        transcriptNode.replaceChildren(prefix, tail);
+      } else {
+        transcriptNode.textContent = data.original || "";
+      }
       const translatedText = data.translated ? data.translated : (data.is_final ? "-" : "…");
       document.getElementById("currentTranslated").textContent = translatedText;
       const sourceLang = data.source_lang || getSourceLang();
       document.getElementById("originalLabel").textContent = `Original (${LANG_NAMES[sourceLang] || sourceLang})`;
 
       if (data.is_final) {
+        // A completed utterance is persisted once, regardless of how often
+        // the browser reconnects or a duplicate final payload arrives.
+        if (data.utterance_id && historyData.some(item => item.utterance_id === data.utterance_id)) return;
         historyData.push({
           original: data.original,
           translated: data.translated,
@@ -232,6 +250,9 @@
           time: data.time,
           latency_ms: data.latency_ms,
           chunk_id: data.chunk_id,
+          utterance_id: data.utterance_id,
+          audio_start_ms: data.audio_start_ms,
+          audio_end_ms: data.audio_end_ms,
         });
 
         const historyList = document.getElementById("historyList");

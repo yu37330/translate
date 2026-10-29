@@ -25,13 +25,23 @@ class UtteranceBuffer:
         self.min_interim_sec = min_interim_sec
         self.interim_interval_sec = interim_interval_sec
         self.max_utterance_sec = max_utterance_sec
+        # Absolute audio-sample clock; timestamps are relative to this WSS session.
+        self.total_received_samples = 0
+        self.last_event_start_sample = 0
+        self.last_event_end_sample = 0
+        self.silence_since_voice_samples = 0
         self.reset()
+
+    @property
+    def silence_since_voice_sec(self) -> float:
+        return self.silence_since_voice_samples / self.sample_rate
 
     def reset(self) -> None:
         self._chunks: list[np.ndarray] = []
         self._samples = 0
         self._silence_samples = 0
         self._last_decode_samples = 0
+        self._utterance_start_sample = self.total_received_samples
         self._preroll = np.empty(0, dtype=np.float32)
 
     @property
@@ -55,6 +65,8 @@ class UtteranceBuffer:
         if not self.active:
             return None
         audio = np.concatenate(self._chunks)
+        self.last_event_start_sample = self._utterance_start_sample
+        self.last_event_end_sample = self.total_received_samples
         self.reset()
         return audio
 
@@ -66,17 +78,27 @@ class UtteranceBuffer:
         """
         if audio.size == 0:
             return None
+        chunk_start = self.total_received_samples
+        self.total_received_samples += audio.size
         has_voice, trailing = self._voice_frames(audio)
+        # Unlike a wall-clock timer, this advances on actual PCM input, even
+        # if Whisper spends seconds decoding a previous utterance.
+        if has_voice:
+            self.silence_since_voice_samples = trailing
+        else:
+            self.silence_since_voice_samples += audio.size
         if not self.active and not has_voice:
             if self.preroll_samples:
                 self._preroll = np.concatenate((self._preroll, audio))[-self.preroll_samples:]
             return None
-        if not self.active and self._preroll.size:
-            # Include a small amount of audio before the detected onset, so that
-            # quiet consonants are not clipped by the conservative energy gate.
-            self._chunks.append(self._preroll)
-            self._samples += self._preroll.size
-            self._preroll = np.empty(0, dtype=np.float32)
+        if not self.active:
+            self._utterance_start_sample = max(0, chunk_start - self._preroll.size)
+            if self._preroll.size:
+                # Keep speech-onset pad for recognition, but each audio sample
+                # still belongs to exactly one measured utterance window.
+                self._chunks.append(self._preroll)
+                self._samples += self._preroll.size
+                self._preroll = np.empty(0, dtype=np.float32)
         self._chunks.append(audio.copy())
         self._samples += audio.size
         self._silence_samples = trailing if has_voice else self._silence_samples + audio.size
@@ -92,6 +114,8 @@ class UtteranceBuffer:
         if not (final or interim):
             return None
         utterance = np.concatenate(self._chunks)
+        self.last_event_start_sample = self._utterance_start_sample
+        self.last_event_end_sample = self.total_received_samples
         if final:
             self.reset()
             return "final", utterance

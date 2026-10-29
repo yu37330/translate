@@ -29,7 +29,7 @@ def main() -> None:
     assert "cell.textContent = value" in html
     assert "new WebSocket" in html
     assert "download_model(" in dockerfile
-    assert "COPY app.py bedrock_text.py streaming_asr.py ." in dockerfile
+    assert "COPY app.py bedrock_text.py streaming_asr.py transcript_stability.py quality_guard.py ." in dockerfile
     streaming = (base / "streaming_asr.py").read_text(encoding="utf-8")
     ast.parse(streaming, filename="streaming_asr.py")
     ast.parse((base / "test_streaming_asr.py").read_text(encoding="utf-8"), filename="test_streaming_asr.py")
@@ -44,9 +44,17 @@ def main() -> None:
     assert "ASR_END_SILENCE_SEC" in source
     assert "ASR_PREROLL_SEC" in source
     assert "self._preroll" in streaming
-    for path in ("accuracy_metrics.py", "benchmark_asr.py", "test_accuracy_metrics.py"):
+    for path in ("accuracy_metrics.py", "benchmark_asr.py", "test_accuracy_metrics.py",
+                 "transcript_stability.py", "quality_guard.py", "test_vexa_quality.py",
+                 "replay_asr.py", "test_replay_asr.py"):
         ast.parse((base / path).read_text(encoding="utf-8"), filename=path)
     assert '"type": "translation"' in source
+    assert "ASR_CONTEXT_RESET_SEC" in source
+    assert "audio_start_ms" in source and "audio_end_ms" in source
+    assert "LocalAgreement" in source
+    assert "reject_low_confidence_segment" in source
+    assert "stable_prefix" in html
+    assert "utterance_id" in html
     assert 'BEDROCK_MODEL_ID' in source
     assert 'translate_bedrock' in source
     assert 'bedrock:InvokeModel' in (base / "README.md").read_text(encoding="utf-8")

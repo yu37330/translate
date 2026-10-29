@@ -23,6 +23,8 @@ load_dotenv(Path(__file__).with_name('.env'))
 # .env読み込み後にBedrockの設定値を確定する
 from bedrock_text import BEDROCK_MODEL_ID, generate_text, translate_text
 from streaming_asr import UtteranceBuffer
+from transcript_stability import LocalAgreement
+from quality_guard import reject_low_confidence_segment, has_suspicious_repetition
 
 # ---------- Configuration ----------
 DEFAULT_SOURCE_LANG = "ja"
@@ -38,6 +40,7 @@ ASR_BEAM_SIZE = min(8, max(1, int(os.getenv("ASR_BEAM_SIZE", "3"))))
 ASR_SPEECH_THRESHOLD = float(os.getenv("ASR_SPEECH_THRESHOLD", "0.0006"))
 ASR_END_SILENCE_SEC = float(os.getenv("ASR_END_SILENCE_SEC", "0.8"))
 ASR_PREROLL_SEC = float(os.getenv("ASR_PREROLL_SEC", "0.3"))
+ASR_CONTEXT_RESET_SEC = max(2.0, float(os.getenv("ASR_CONTEXT_RESET_SEC", "3.0")))
 ASR_HOTWORDS = os.getenv("ASR_HOTWORDS", "").strip()[:300]
 ASR_VOCAB_PROMPT = os.getenv("ASR_VOCAB_PROMPT", "").strip()[:500]
 ASR_PREVIOUS_CONTEXT_CHARS = min(160, max(0, int(os.getenv("ASR_PREVIOUS_CONTEXT_CHARS", "80"))))
@@ -83,6 +86,10 @@ def make_subtitle_json(
     latency_ms: float,
     chunk_id: int,
     is_final: bool,
+    audio_start_ms: float = 0.0,
+    audio_end_ms: float = 0.0,
+    utterance_id: str = "",
+    stable_prefix: str = "",
 ) -> str:
     now = time.strftime("%H:%M:%S")
     return json.dumps(
@@ -95,6 +102,10 @@ def make_subtitle_json(
             "latency_ms": round(latency_ms, 1),
             "chunk_id": chunk_id,
             "is_final": is_final,
+            "audio_start_ms": round(audio_start_ms, 1),
+            "audio_end_ms": round(audio_end_ms, 1),
+            "utterance_id": utterance_id,
+            "stable_prefix": stable_prefix,
         },
         ensure_ascii=False,
     )
@@ -169,7 +180,7 @@ async def summarize(req: SummarizeRequest, request: Request):
 
 
 # ---------- WebSocket ----------
-def run_whisper(audio: np.ndarray, language: Optional[str], prompt: str) -> Tuple[str, object]:
+def run_whisper(audio: np.ndarray, language: Optional[str], prompt: str) -> Tuple[str, object, bool]:
     # Silero VAD filters intra-utterance silence but we never discard browser PCM.
     # The model processes the FULL buffered utterance, not isolated 2-second pieces.
     segments, info = asr_model.transcribe(
@@ -186,8 +197,21 @@ def run_whisper(audio: np.ndarray, language: Optional[str], prompt: str) -> Tupl
         hotwords=ASR_HOTWORDS or None,
         condition_on_previous_text=False,
     )
-    recognized = "".join(segment.text for segment in segments).strip()
-    return recognized, info
+    accepted = []
+    rejected = 0
+    for segment in segments:
+        if reject_low_confidence_segment(segment):
+            rejected += 1
+            continue
+        accepted.append(segment.text)
+    if rejected:
+        # Count only; conference text/recognized words never appear in logs.
+        print(f"[INFO] Whisper rejected {rejected} very-low-confidence segment(s)")
+    recognized = "".join(accepted).strip()
+    if recognized and has_suspicious_repetition(recognized):
+        # A pure repetition alone is not evidence enough to delete speech.
+        print("[INFO] Whisper repetitive hypothesis observed (not automatically removed)")
+    return recognized, info, bool(rejected and not recognized)
 
 
 def build_asr_prompt(previous_final: str) -> str:
@@ -211,6 +235,8 @@ async def process_audio_queue(queue: asyncio.Queue, websocket: WebSocket) -> Non
     )
     previous_final = ""
     previous_interim = ""
+    previous_stable = ""
+    agreement = LocalAgreement()
     translation_tasks: set[asyncio.Task] = set()
     send_lock = asyncio.Lock()
 
@@ -234,11 +260,12 @@ async def process_audio_queue(queue: asyncio.Queue, websocket: WebSocket) -> Non
     async def recognize(
         kind: str, buffered_audio: np.ndarray, chunk_id: int,
         source_lang: str, target_lang: str, started: float,
+        audio_start_ms: float, audio_end_ms: float,
     ) -> None:
-        nonlocal previous_final, previous_interim
+        nonlocal previous_final, previous_interim, previous_stable
         model_lang = None if source_lang == "auto" else source_lang
         try:
-            original, info = await asyncio.to_thread(
+            original, info, rejected_only = await asyncio.to_thread(
                 run_whisper, buffered_audio, model_lang, build_asr_prompt(previous_final)
             )
         except Exception as exc:
@@ -246,25 +273,36 @@ async def process_audio_queue(queue: asyncio.Queue, websocket: WebSocket) -> Non
             return
 
         detected_lang = getattr(info, "language", source_lang) if source_lang == "auto" else source_lang
+        # Time-based identity: all interim revisions of this utterance share
+        # an ID, instead of being treated as new permanent transcript lines.
+        utterance_id = f"u{round(audio_start_ms * PCM_SAMPLE_RATE / 1000)}"
         if kind == "interim":
-            if original and original != previous_interim:
+            stable_prefix = agreement.observe(original) if original else ""
+            # An unchanged hypothesis still counts as a second consistent pass.
+            # Send an update if the stable portion newly appears.
+            if original and (original != previous_interim or stable_prefix != previous_stable):
                 await send(json.loads(make_subtitle_json(
                     original, "", detected_lang, target_lang,
-                    (time.perf_counter() - started) * 1000, chunk_id, False
+                    (time.perf_counter() - started) * 1000, chunk_id, False,
+                    audio_start_ms, audio_end_ms, utterance_id, stable_prefix
                 )))
-                previous_interim = original
+            previous_interim = original or previous_interim
+            previous_stable = stable_prefix
             return
 
         # Re-decode the completed utterance; full-sentence hypotheses replace,
         # rather than string-concatenate, previous partial hypotheses.
-        final_text = original or previous_interim
+        final_text = original or ("" if rejected_only else previous_interim)
         previous_interim = ""
+        previous_stable = ""
+        agreement.reset()
         if not final_text:
             return
         previous_final = final_text
         ok = await send(json.loads(make_subtitle_json(
             final_text, "", detected_lang, target_lang,
-            (time.perf_counter() - started) * 1000, chunk_id, True
+            (time.perf_counter() - started) * 1000, chunk_id, True,
+            audio_start_ms, audio_end_ms, utterance_id
         )))
         if ok and target_lang != NO_TRANSLATE_LANG and BEDROCK_MODEL_ID:
             task = asyncio.create_task(translate_in_background(
@@ -285,7 +323,9 @@ async def process_audio_queue(queue: asyncio.Queue, websocket: WebSocket) -> Non
                 if leftover is not None:
                     await recognize(
                         "final", leftover, last_chunk_id,
-                        last_source_lang, last_target_lang, time.perf_counter()
+                        last_source_lang, last_target_lang, time.perf_counter(),
+                        1000 * utterance.last_event_start_sample / PCM_SAMPLE_RATE,
+                        1000 * utterance.last_event_end_sample / PCM_SAMPLE_RATE,
                     )
                 graceful_finish = True
                 break
@@ -296,11 +336,20 @@ async def process_audio_queue(queue: asyncio.Queue, websocket: WebSocket) -> Non
             last_target_lang = target_lang
             started = time.perf_counter()
             audio = np.frombuffer(pcm_bytes, dtype=np.int16).astype(np.float32) / 32768.0
+            # Reset the prompt when a genuinely new topic starts after silence,
+            # using audio-clock time (never CPU inference/wall-clock time).
+            if previous_final and not utterance.active and utterance.silence_since_voice_sec >= ASR_CONTEXT_RESET_SEC:
+                previous_final = ""
+                agreement.reset()
             event = utterance.feed(audio)
             if event is None:
                 continue
             kind, buffered_audio = event
-            await recognize(kind, buffered_audio, chunk_id, source_lang, target_lang, started)
+            await recognize(
+                kind, buffered_audio, chunk_id, source_lang, target_lang, started,
+                1000 * utterance.last_event_start_sample / PCM_SAMPLE_RATE,
+                1000 * utterance.last_event_end_sample / PCM_SAMPLE_RATE,
+            )
     finally:
         if graceful_finish and translation_tasks:
             await asyncio.wait(translation_tasks, timeout=8)

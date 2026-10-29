@@ -53,7 +53,7 @@ def main() -> None:
     match = re.search(r"<script>(.*?)</script>", html, flags=re.DOTALL)
     assert match is not None
     if shutil.which("node"):
-        subprocess.run(["node", "--check"], input=match.group(1), text=True, check=True)
+        subprocess.run(["node", "--check"], input=match.group(1), text=True, encoding="utf-8", check=True)
     print("static checks passed")
 
 

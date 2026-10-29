@@ -104,7 +104,7 @@
     <button id="startBtn">Start</button>
     <button id="stopBtn" disabled>Stop</button>
     <button id="clearBtn">履歴クリア</button>
-    <div class="hint">2秒ごとに16kHz PCMを送信。WhisperはFargate内で実行します。翻訳・要約を使用すると文字起こしテキストのみBedrockへ送信します。</div>
+    <div class="hint">2秒ごとに16kHz PCMを送信。サーバーは発話ごとに約4〜12秒の文脈を使って認識します。翻訳・要約を使用すると文字起こしテキストのみBedrockへ送信します。</div>
   </div>
 
   <div class="hint" id="bedrockNotice">Bedrock連携はデフォルト無効。BEDROCK_MODEL_ID設定時のみ翻訳・要約を選択できます。利用規定とリージョンを確認してください。</div>
@@ -149,7 +149,7 @@
   <script>
     const SAMPLE_RATE = 16000;
     const CHUNK_SEC = 2;
-    const VAD_THRESHOLD = 0.002; // RMS gate on client (server also double-checks)
+    // Do not discard low-volume audio in the browser. Server owns endpointing.
 
     const LANG_NAMES = {
       "auto": "Auto",
@@ -405,15 +405,33 @@
       audioCtx = new AudioContext({ sampleRate: SAMPLE_RATE });
       const workletCode = `
         class PCMCollector extends AudioWorkletProcessor {
-          constructor() { super(); this.targetRate = ${SAMPLE_RATE}; this.ratio = sampleRate / this.targetRate; }
+          constructor() {
+            super();
+            this.targetRate = ${SAMPLE_RATE};
+            this.rateRatio = this.targetRate / sampleRate;
+            this.phase = 0;
+            this.accum = 0;
+            this.accumSamples = 0;
+          }
           process(inputs) {
             const input = inputs[0];
             if (!input || input.length === 0 || !input[0]) return true;
             const ch = input[0];
             if (ch.length === 0) return true;
-            const step = this.ratio || 1;
             const out = [];
-            for (let i = 0; i < ch.length; i += step) { out.push(ch[Math.floor(i)]); }
+            // Keep the fractional resampling phase across process callbacks.
+            // With input rates above 16kHz, averaging also reduces aliasing.
+            for (let i = 0; i < ch.length; i++) {
+              this.accum += ch[i];
+              this.accumSamples++;
+              this.phase += this.rateRatio;
+              while (this.phase >= 1) {
+                out.push(this.accumSamples > 0 ? this.accum / this.accumSamples : ch[i]);
+                this.phase -= 1;
+                this.accum = 0;
+                this.accumSamples = 0;
+              }
+            }
             let sum = 0;
             for (let i = 0; i < out.length; i++) sum += out[i] * out[i];
             const rms = Math.sqrt(sum / (out.length || 1));
@@ -452,21 +470,15 @@
       for (let i = 0; i < pcm.length; i++) pcmBuffer.push(pcm[i]);
 
       const chunkSamples = SAMPLE_RATE * CHUNK_SEC;
-      if (pcmBuffer.length >= chunkSamples) {
+      while (pcmBuffer.length >= chunkSamples) {
         const avgRms = rmsSum / Math.max(1, rmsCount);
         const pcmToSend = new Int16Array(pcmBuffer.slice(0, chunkSamples));
         pcmBuffer = pcmBuffer.slice(chunkSamples);
         rmsSum = 0; rmsCount = 0;
-
-        if (avgRms < VAD_THRESHOLD) {
-          log(`VAD skip (rms=${avgRms.toFixed(4)})`, "info");
-          return;
-        }
-
         if (ws && ws.readyState === WebSocket.OPEN && isRecording) {
           ws.send(pcmToSend.buffer);
           log(`送信: ${pcmToSend.byteLength} bytes (rms=${avgRms.toFixed(4)})`, "info");
-          setStatus("送信中... Whisper処理待ち", "working");
+          setStatus("送信中... 音声認識待ち", "working");
         }
       }
     }
@@ -515,6 +527,19 @@
             document.querySelectorAll('input[name="audioSource"]').forEach(r => r.disabled = true);
             document.getElementById("sourceLang").disabled = true;
             document.getElementById("targetLang").disabled = !bedrockEnabled;
+            return;
+          }
+          if (data.type === "translation") {
+            const index = historyData.findIndex(item => item.chunk_id === data.chunk_id);
+            if (index >= 0) {
+              historyData[index].translated = data.translated;
+              const rows = document.querySelectorAll("#historyList .item");
+              const translatedNode = rows[index]?.querySelector(".translated");
+              if (translatedNode) translatedNode.textContent = data.translated;
+              if (index === historyData.length - 1) {
+                document.getElementById("currentTranslated").textContent = data.translated;
+              }
+            }
             return;
           }
           const label = data.is_final ? "確定" : "暫定";

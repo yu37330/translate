@@ -31,7 +31,7 @@ def main() -> None:
     assert "download_model(" in dockerfile
 
     # Node.jsがある場合はフロントエンドのJavaScript構文も検証
-    match = re.search(r"<script>([\\s\\S]*?)</script>", html)
+    match = re.search(r"<script>(.*?)</script>", html, flags=re.DOTALL)
     assert match is not None
     if shutil.which("node"):
         subprocess.run(["node", "--check"], input=match.group(1), text=True, check=True)

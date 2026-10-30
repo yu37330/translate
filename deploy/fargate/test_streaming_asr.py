@@ -64,6 +64,40 @@ class UtteranceBufferTests(unittest.TestCase):
         self.assertEqual(event[0], "final")
         self.assertEqual(event[1].size, int(2.0 * 16000))
 
+    def test_feed_many_preserves_new_speech_after_midpacket_silence(self):
+        buffer = UtteranceBuffer(end_silence_sec=0.8, preroll_sec=0.3)
+        # Speech ends; the next 0.5s packet contains enough silence to close
+        # this utterance AND the beginning of a new utterance.
+        events = []
+        events += buffer.feed_many(pcm(1.0, 0.01))
+        self.assertEqual(events, [])
+        events += buffer.feed_many(pcm(0.5, 0.0))
+        events += buffer.feed_many(np.concatenate([pcm(0.35, 0.0), pcm(0.15, 0.02)]))
+        self.assertEqual([e[0] for e in events], ["final"])
+        first = events[0]
+        self.assertLessEqual(first[3], 1.35 * 16000 + 1)
+        self.assertTrue(buffer.active, "second utterance must not be lost")
+        second_events = buffer.feed_many(pcm(1.0, 0.0))
+        self.assertEqual([e[0] for e in second_events], ["final"])
+        second = second_events[0]
+        self.assertGreater(second[2], first[2])
+        self.assertGreater(second[3], first[3])
+        self.assertTrue(np.any(second[1] > 0.015), "new utterance speech retained")
+
+    def test_feed_many_timestamps_monotonic_for_multiple_events(self):
+        buffer = UtteranceBuffer(end_silence_sec=0.8)
+        speech = np.concatenate([
+            pcm(0.5, 0.01), pcm(1.0, 0.0),
+            pcm(0.5, 0.03), pcm(1.0, 0.0),
+        ])
+        events = buffer.feed_many(speech)
+        self.assertEqual([e[0] for e in events], ["final", "final"])
+        self.assertEqual(events[0][2], 0)
+        self.assertLess(events[0][3], events[1][3])
+        self.assertTrue(np.any(events[0][1] > 0.009))
+        self.assertTrue(np.any(events[1][1] > 0.029))
+        self.assertEqual(buffer.total_received_samples, speech.size)
+
     def test_short_utterance_and_stop_does_not_lose_words(self):
         buffer = UtteranceBuffer()
         self.assertIsNone(buffer.feed(pcm(0.5)))

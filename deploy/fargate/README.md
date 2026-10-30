@@ -202,3 +202,16 @@ docker push "$ECR_URI:small-poc"
 ## サイズ・コスト
 
 Whisper smallのモデルファイル単体は数百MBですが、ECRの実イメージ容量は依存パッケージと圧縮方法によって変わります。**サイズはdocker build後に`docker image inspect`で実測してください。** Fargate Linux 1.4.0+ はデフォルト20 GiBのエフェメラルストレージを備えます。圧縮・展開後のコンテナイメージもここに計上されます。
+
+## License and third-party notices
+
+The original application source is under the **MIT License**. This Fargate
+image carries its own [LICENSE](LICENSE) and
+[THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md) for clarity when the image is
+redistributed.
+
+MIT permits commercial use, modification and redistribution with the original
+copyright and license notice retained. **The model, Python/native packages and
+base image are separately licensed.** Review their exact installed revisions
+and redistribution obligations; the notice file is an upstream summary, not a
+complete license inventory.

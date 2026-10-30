@@ -13,6 +13,15 @@ def main() -> None:
     source = (base / "app.py").read_text(encoding="utf-8")
     html = (base / "templates" / "index.html").read_text(encoding="utf-8")
     dockerfile = (base / "Dockerfile").read_text(encoding="utf-8")
+    root_license = (base.parent.parent / "LICENSE").read_text(encoding="utf-8")
+    fargate_license = (base / "LICENSE").read_text(encoding="utf-8")
+    notices = (base / "THIRD_PARTY_NOTICES.md").read_text(encoding="utf-8")
+    assert "MIT License" in root_license
+    assert "Copyright (c) 2026 yu37330" in root_license
+    assert root_license == fargate_license
+    assert "COPY LICENSE THIRD_PARTY_NOTICES.md ./" in dockerfile
+    assert "Systran/faster-whisper-small" in notices
+    assert "Vexa" in notices
 
     # Python構文の検証（モデルのダウンロードやimportは実行しない）
     ast.parse(source, filename="app.py")

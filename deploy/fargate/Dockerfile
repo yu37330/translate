@@ -21,6 +21,10 @@ ENV ASR_MODEL_PATH=/opt/models/${MODEL_SIZE} \
 
 COPY app.py bedrock_text.py streaming_asr.py transcript_stability.py quality_guard.py .
 COPY templates/ ./templates/
+# Preserve the app's MIT text and third-party attribution in the distributable image.
+# These are stored inside deploy/fargate because this Dockerfile is built with
+# ./deploy/fargate as its build context.
+COPY LICENSE THIRD_PARTY_NOTICES.md ./
 
 # コンテナを非rootで実行
 RUN useradd --uid 10001 --create-home --shell /usr/sbin/nologin appuser

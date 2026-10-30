@@ -561,7 +561,12 @@
             return;
           }
           if (data.type === "translation") {
-            const index = historyData.findIndex(item => item.chunk_id === data.chunk_id);
+            // chunk_id restarts at 1 on every recording. Correlate translations
+            // with the immutable session-scoped utterance ID to avoid updating
+            // a transcript from a previous meeting on the same page.
+            const index = data.utterance_id
+              ? historyData.findIndex(item => item.utterance_id === data.utterance_id)
+              : -1;
             if (index >= 0) {
               historyData[index].translated = data.translated;
               const rows = document.querySelectorAll("#historyList .item");

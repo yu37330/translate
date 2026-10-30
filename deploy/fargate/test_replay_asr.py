@@ -14,7 +14,7 @@ class ReplayTests(unittest.TestCase):
         result = run_clip(chunks, lambda audio: "生産計画")
         self.assertEqual(result["utterances"], 1)
         self.assertEqual(result["text"], "生産計画")
-        self.assertEqual(result["windows"], [(3200, 28800)]  # 0.8s silence endpoint, not the packet boundary)
+        self.assertEqual(result["windows"], [(3200, 28800)])  # Endpoint after 0.8s silence.
 
     def test_replay_long_monologue_stability(self):
         chunks = np.concatenate([pcm(8, .02), pcm(1, 0)])

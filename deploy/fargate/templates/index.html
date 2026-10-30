@@ -274,6 +274,22 @@
       }
     }
 
+    function updateTranslation(data) {
+      // chunk_id restarts on every recording. Only an exact recording-scoped
+      // utterance ID may update a previous final transcript.
+      if (!data.utterance_id) return false;
+      const index = historyData.findIndex(item => item.utterance_id === data.utterance_id);
+      if (index < 0) return false;
+      historyData[index].translated = data.translated || "";
+      const rows = document.querySelectorAll("#historyList .item");
+      const translatedNode = rows[index]?.querySelector(".translated");
+      if (translatedNode) translatedNode.textContent = data.translated || "";
+      if (index === historyData.length - 1) {
+        document.getElementById("currentTranslated").textContent = data.translated || "";
+      }
+      return true;
+    }
+
     function clearHistory() {
       historyData = [];
       lastSummarizedIndex = 0;
@@ -561,21 +577,7 @@
             return;
           }
           if (data.type === "translation") {
-            // chunk_id restarts at 1 on every recording. Correlate translations
-            // with the immutable session-scoped utterance ID to avoid updating
-            // a transcript from a previous meeting on the same page.
-            const index = data.utterance_id
-              ? historyData.findIndex(item => item.utterance_id === data.utterance_id)
-              : -1;
-            if (index >= 0) {
-              historyData[index].translated = data.translated;
-              const rows = document.querySelectorAll("#historyList .item");
-              const translatedNode = rows[index]?.querySelector(".translated");
-              if (translatedNode) translatedNode.textContent = data.translated;
-              if (index === historyData.length - 1) {
-                document.getElementById("currentTranslated").textContent = data.translated;
-              }
-            }
+            updateTranslation(data);
             return;
           }
           const label = data.is_final ? "確定" : "暫定";

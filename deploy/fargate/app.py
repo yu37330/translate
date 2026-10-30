@@ -53,6 +53,10 @@ ASR_MAX_UTTERANCE_SEC = float(os.getenv("ASR_MAX_UTTERANCE_SEC", "12"))
 APP_ACCESS_TOKEN = os.getenv("APP_ACCESS_TOKEN", "")
 MAX_AUDIO_CHUNK_BYTES = 128_000
 MAX_AUDIO_QUEUE_CHUNKS = 32
+# Preserve every final utterance under load; interim drafts are expendable.
+ASR_INTERIM_BACKLOG_THRESHOLD = max(
+    1, min(MAX_AUDIO_QUEUE_CHUNKS, int(os.getenv("ASR_INTERIM_BACKLOG_THRESHOLD", "8")))
+)
 
 PCM_SAMPLE_RATE = 16000
 CHUNK_SEC = 0.5
@@ -356,6 +360,11 @@ async def process_audio_queue(queue: asyncio.Queue, websocket: WebSocket) -> Non
             # One 500ms PCM packet may close a sentence AND begin the next.
             # Process both events, without dropping speech after the cut.
             for kind, buffered_audio, start_sample, end_sample in utterance.feed_many(audio):
+                if kind == "interim" and queue.qsize() >= ASR_INTERIM_BACKLOG_THRESHOLD:
+                    # Keep the full PCM window in UtteranceBuffer; only skip the
+                    # optional intermediate decode when it risks starving finals.
+                    print("[INFO] Skipped interim inference due to audio queue backlog")
+                    continue
                 await recognize(
                     kind, buffered_audio, chunk_id, source_lang, target_lang, started,
                     1000 * start_sample / PCM_SAMPLE_RATE,

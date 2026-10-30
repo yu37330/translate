@@ -62,6 +62,9 @@ def main() -> None:
     assert "reject_low_confidence_segment" in source
     assert "stable_prefix" in html
     assert "utterance_id" in html
+    assert "function updateTranslation(data)" in html
+    assert "historyData.findIndex(item => item.utterance_id === data.utterance_id)" in html
+    assert (base / "test_subtitle_ui.js").exists()
     assert 'BEDROCK_MODEL_ID' in source
     assert 'translate_bedrock' in source
     assert 'bedrock:InvokeModel' in (base / "README.md").read_text(encoding="utf-8")

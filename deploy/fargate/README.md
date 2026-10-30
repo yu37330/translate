@@ -87,6 +87,8 @@ python -m unittest -v test_streaming_asr
 python -m unittest -v test_bedrock_text
 # Node.jsがあれば16k/48kリサンプリングのJSテストも実施
 node test_audio_worklet.js
+# 連続録音の字幕ID・遅延翻訳の紐付け・暫定表示をオフライン検証
+node test_subtitle_ui.js
 # 正解テキストとの比較評価（モデル不要）
 python -m unittest -v test_accuracy_metrics test_vexa_quality test_replay_asr
 # モデルを使ってCER / 専門用語再現率 / リアルタイム倍率を測る場合

@@ -34,6 +34,13 @@ def main() -> None:
     ast.parse(streaming, filename="streaming_asr.py")
     ast.parse((base / "test_streaming_asr.py").read_text(encoding="utf-8"), filename="test_streaming_asr.py")
     assert "UtteranceBuffer" in source
+    assert "feed_many(audio)" in source
+    assert "asr_inference_semaphore" in source
+    assert "ASR_INTERIM_BACKLOG_THRESHOLD" in source
+    assert "session_id = secrets.token_hex(8)" in source
+    assert "utterance_id: str" in source
+    assert "item.utterance_id === data.utterance_id" in html
+    assert "def feed_many(" in streaming
     assert "vad_parameters=" in source
     assert "ASR_VOCAB_PROMPT" in source
     assert '"type": "finished"' in source

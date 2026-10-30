@@ -70,6 +70,30 @@ class UtteranceBuffer:
         self.reset()
         return audio
 
+    def feed_many(
+        self, audio: np.ndarray, frame_sec: float = 0.1
+    ) -> list[tuple[str, np.ndarray, int, int]]:
+        """Consume a transport packet in short PCM slices, with lossless boundaries.
+
+        A packet can contain BOTH the silence ending a prior utterance and
+        speech beginning the next. Processing the entire packet in one call
+        previously finalized the first and silently consumed the second.
+        Each event carries a snapshot of its audio sample-clock boundaries.
+        """
+        if frame_sec < 0.06 or frame_sec > 0.5:
+            raise ValueError("frame_sec must be between 60ms and 500ms")
+        step = max(1, int(round(self.sample_rate * frame_sec)))
+        results = []
+        for offset in range(0, audio.size, step):
+            event = self.feed(audio[offset:offset + step])
+            if event is not None:
+                kind, buffered = event
+                results.append((
+                    kind, buffered,
+                    self.last_event_start_sample, self.last_event_end_sample,
+                ))
+        return results
+
     def feed(self, audio: np.ndarray) -> tuple[str, np.ndarray] | None:
         """Return ('interim'|'final', full utterance audio), or None.
 

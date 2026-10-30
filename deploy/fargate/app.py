@@ -36,6 +36,9 @@ ASR_MODEL_PATH = os.getenv("ASR_MODEL_PATH", ASR_MODEL_SIZE)
 ASR_DEVICE = "cpu"  # FargateではGPUを利用できない
 ASR_COMPUTE_TYPE = "int8"
 ASR_CPU_THREADS = int(os.getenv("ASR_CPU_THREADS", "4"))
+# Shared per container. Avoid several CPU-heavy Whisper calls saturating a
+# Fargate task when multiple browser WebSockets are active.
+ASR_MAX_CONCURRENT_INFERENCES = max(1, min(2, int(os.getenv("ASR_MAX_CONCURRENT_INFERENCES", "1"))))
 ASR_BEAM_SIZE = min(8, max(1, int(os.getenv("ASR_BEAM_SIZE", "3"))))
 ASR_SPEECH_THRESHOLD = float(os.getenv("ASR_SPEECH_THRESHOLD", "0.0006"))
 ASR_END_SILENCE_SEC = float(os.getenv("ASR_END_SILENCE_SEC", "0.8"))
@@ -50,12 +53,17 @@ ASR_MAX_UTTERANCE_SEC = float(os.getenv("ASR_MAX_UTTERANCE_SEC", "12"))
 APP_ACCESS_TOKEN = os.getenv("APP_ACCESS_TOKEN", "")
 MAX_AUDIO_CHUNK_BYTES = 128_000
 MAX_AUDIO_QUEUE_CHUNKS = 32
+# Preserve every final utterance under load; interim drafts are expendable.
+ASR_INTERIM_BACKLOG_THRESHOLD = max(
+    1, min(MAX_AUDIO_QUEUE_CHUNKS, int(os.getenv("ASR_INTERIM_BACKLOG_THRESHOLD", "8")))
+)
 
 PCM_SAMPLE_RATE = 16000
 CHUNK_SEC = 0.5
 # 音声認識はコンテナ内で実行し、LLMを有効化した場合のみBedrockへ認識文字列を送る
 app = FastAPI()
 templates = Jinja2Templates(directory="templates")
+asr_inference_semaphore = asyncio.Semaphore(ASR_MAX_CONCURRENT_INFERENCES)
 
 # Load Whisper once at startup
 asr_model = WhisperModel(
@@ -236,6 +244,8 @@ async def process_audio_queue(queue: asyncio.Queue, websocket: WebSocket) -> Non
     previous_final = ""
     previous_interim = ""
     previous_stable = ""
+    session_id = secrets.token_hex(8)
+    # Never reuse u0/u8000 across separate recordings on the same browser page.
     agreement = LocalAgreement()
     translation_tasks: set[asyncio.Task] = set()
     send_lock = asyncio.Lock()
@@ -251,11 +261,16 @@ async def process_audio_queue(queue: asyncio.Queue, websocket: WebSocket) -> Non
             print(f"[WARN] WebSocket send failed ({type(exc).__name__})")
             return False
 
-    async def translate_in_background(original: str, source: str, target: str, chunk_id: int) -> None:
+    async def translate_in_background(
+        original: str, source: str, target: str, chunk_id: int, utterance_id: str
+    ) -> None:
         # Do NOT block Whisper's audio consumer on a Bedrock API call.
         translated = await asyncio.to_thread(translate_bedrock, original, source, target)
         if translated:
-            await send({"type": "translation", "chunk_id": chunk_id, "translated": translated})
+            await send({
+                "type": "translation", "chunk_id": chunk_id,
+                "utterance_id": utterance_id, "translated": translated,
+            })
 
     async def recognize(
         kind: str, buffered_audio: np.ndarray, chunk_id: int,
@@ -265,9 +280,10 @@ async def process_audio_queue(queue: asyncio.Queue, websocket: WebSocket) -> Non
         nonlocal previous_final, previous_interim, previous_stable
         model_lang = None if source_lang == "auto" else source_lang
         try:
-            original, info, rejected_only = await asyncio.to_thread(
-                run_whisper, buffered_audio, model_lang, build_asr_prompt(previous_final)
-            )
+            async with asr_inference_semaphore:
+                original, info, rejected_only = await asyncio.to_thread(
+                    run_whisper, buffered_audio, model_lang, build_asr_prompt(previous_final)
+                )
         except Exception as exc:
             print(f"[WARN] Whisper inference failed ({type(exc).__name__})")
             return
@@ -275,7 +291,7 @@ async def process_audio_queue(queue: asyncio.Queue, websocket: WebSocket) -> Non
         detected_lang = getattr(info, "language", source_lang) if source_lang == "auto" else source_lang
         # Time-based identity: all interim revisions of this utterance share
         # an ID, instead of being treated as new permanent transcript lines.
-        utterance_id = f"u{round(audio_start_ms * PCM_SAMPLE_RATE / 1000)}"
+        utterance_id = f"{session_id}:s{round(audio_start_ms * PCM_SAMPLE_RATE / 1000)}"
         if kind == "interim":
             stable_prefix = agreement.observe(original) if original else ""
             # An unchanged hypothesis still counts as a second consistent pass.
@@ -306,7 +322,7 @@ async def process_audio_queue(queue: asyncio.Queue, websocket: WebSocket) -> Non
         )))
         if ok and target_lang != NO_TRANSLATE_LANG and BEDROCK_MODEL_ID:
             task = asyncio.create_task(translate_in_background(
-                final_text, detected_lang, target_lang, chunk_id
+                final_text, detected_lang, target_lang, chunk_id, utterance_id
             ))
             translation_tasks.add(task)
             task.add_done_callback(translation_tasks.discard)
@@ -341,15 +357,19 @@ async def process_audio_queue(queue: asyncio.Queue, websocket: WebSocket) -> Non
             if previous_final and not utterance.active and utterance.silence_since_voice_sec >= ASR_CONTEXT_RESET_SEC:
                 previous_final = ""
                 agreement.reset()
-            event = utterance.feed(audio)
-            if event is None:
-                continue
-            kind, buffered_audio = event
-            await recognize(
-                kind, buffered_audio, chunk_id, source_lang, target_lang, started,
-                1000 * utterance.last_event_start_sample / PCM_SAMPLE_RATE,
-                1000 * utterance.last_event_end_sample / PCM_SAMPLE_RATE,
-            )
+            # One 500ms PCM packet may close a sentence AND begin the next.
+            # Process both events, without dropping speech after the cut.
+            for kind, buffered_audio, start_sample, end_sample in utterance.feed_many(audio):
+                if kind == "interim" and queue.qsize() >= ASR_INTERIM_BACKLOG_THRESHOLD:
+                    # Keep the full PCM window in UtteranceBuffer; only skip the
+                    # optional intermediate decode when it risks starving finals.
+                    print("[INFO] Skipped interim inference due to audio queue backlog")
+                    continue
+                await recognize(
+                    kind, buffered_audio, chunk_id, source_lang, target_lang, started,
+                    1000 * start_sample / PCM_SAMPLE_RATE,
+                    1000 * end_sample / PCM_SAMPLE_RATE,
+                )
     finally:
         if graceful_finish and translation_tasks:
             await asyncio.wait(translation_tasks, timeout=8)

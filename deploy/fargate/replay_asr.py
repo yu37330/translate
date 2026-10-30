@@ -1,4 +1,4 @@
-"""Offline replay of the EXACT 500ms transport + utterance-buffer decisions.
+"""Offline replay of 500ms transport and 100ms sub-frame endpoint decisions.
 
 This uses a pre-downloaded local CTranslate2 Whisper model (never fetches one).
 It prints only aggregate CER, counts, and timing, not meeting transcripts.
@@ -38,7 +38,7 @@ def run_clip(samples, transcribe, *, sample_rate=16000, chunk_sec=0.5):
         nonlocal interim_count, stable_count, previous_interim
         if event is None:
             return
-        kind, audio = event
+        kind, audio, start_sample, end_sample = event
         text = transcribe(audio)
         if kind == "interim":
             interim_count += 1
@@ -51,14 +51,17 @@ def run_clip(samples, transcribe, *, sample_rate=16000, chunk_sec=0.5):
         agreement.reset()
         if final:
             final_parts.append(final)
-            utterance_windows.append((
-                buffer.last_event_start_sample,
-                buffer.last_event_end_sample,
-            ))
+            utterance_windows.append((start_sample, end_sample))
 
     for start in range(0, len(samples), step):
-        publish(buffer.feed(samples[start:start + step]))
-    publish(("final", buffer.flush()) if buffer.active else None)
+        for event in buffer.feed_many(samples[start:start + step]):
+            publish(event)
+    if buffer.active:
+        trailing = buffer.flush()
+        publish((
+            "final", trailing,
+            buffer.last_event_start_sample, buffer.last_event_end_sample
+        ))
     return {
         "text": " ".join(final_parts).strip(),
         "utterances": len(final_parts),

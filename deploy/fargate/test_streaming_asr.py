@@ -75,7 +75,7 @@ class UtteranceBufferTests(unittest.TestCase):
         events += buffer.feed_many(np.concatenate([pcm(0.35, 0.0), pcm(0.15, 0.02)]))
         self.assertEqual([e[0] for e in events], ["final"])
         first = events[0]
-        self.assertLessEqual(first[3], 1.35 * 16000 + 1)
+        self.assertEqual(first[3], int(1.8 * 16000))  # 0.8s of silence after 1s speech
         self.assertTrue(buffer.active, "second utterance must not be lost")
         second_events = buffer.feed_many(pcm(1.0, 0.0))
         self.assertEqual([e[0] for e in second_events], ["final"])
